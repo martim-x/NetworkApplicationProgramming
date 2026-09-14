@@ -232,3 +232,26 @@ Renders/
 *.aep.lock
 Adobe Premiere Pro Auto-Save/
 Adobe After Effects Auto-Save/
+
+# === Visual Studio (сборочные артефакты MSVC) ===
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleasePublic/
+[Rr]eleases/
+x64/
+x86/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+*.ilk
+*.tlog
+*.ipch
+*.iobj
+*.recipe
+*.aps
+.vs/
+*.VC.db
+*.VC.VC.opendb
