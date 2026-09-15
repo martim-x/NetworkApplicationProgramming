@@ -1,5 +1,8 @@
 // Лабораторная работа № 2. Обмен данными по TCP-соединению
 // Серверная часть (ServerT). Задания 1-6, 10, 11, 14, 15
+// ПОМЕТКА (отклонение от исходного кода): VS помечает inet_ntoa как deprecated
+// (рекомендует inet_ntop). Код пособия оставлен как есть — предупреждение отключено макросом.
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <string>
 #include <iostream>
 #include <cstdlib>
@@ -100,7 +103,10 @@ int main(int argc, char* argv[])
 			while (true)
 			{
 				// Задание 11
-				receivedBytes = recv(clientSocket, buffer, sizeof(buffer), 0);
+				// ПОМЕТКА (отклонение от исходного кода): в пособии recv(..., sizeof(buffer), ...).
+				// Здесь sizeof(buffer) - 1: если recv заполнит все 50 байт, то
+				// buffer[receivedBytes] = '\0' ниже записал бы buffer[50] — за границей массива.
+				receivedBytes = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
 				if (receivedBytes == SOCKET_ERROR)
 					throw SetErrorMsgText("recv:", WSAGetLastError());
 

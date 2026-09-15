@@ -1,5 +1,9 @@
 // Лабораторная работа № 2. Обмен данными по TCP-соединению
 // Клиентская часть (ClientT). Задания 7-9, 11-14
+// ПОМЕТКА (отклонение от исходного кода): VS помечает inet_addr и sprintf как deprecated
+// (рекомендует inet_pton и sprintf_s). Код пособия оставлен как есть — предупреждения отключены макросами.
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
 #include <string>
 #include <iostream>
 #include <cstdio>
@@ -90,11 +94,17 @@ int main(int argc, char* argv[])
 			sprintf(sendBuffer, "Hello from Client %03d", messageNumber);
 
 			// Задание 11
-			if (send(clientSocket, sendBuffer, strlen(sendBuffer) + 1, 0) == SOCKET_ERROR)
+			// ПОМЕТКА (отклонение от исходного кода): добавлено явное приведение (int) —
+			// strlen возвращает size_t (64 бита), а третий параметр send ожидает int,
+			// иначе VS предупреждает о возможной потере данных.
+			if (send(clientSocket, sendBuffer, (int)(strlen(sendBuffer) + 1), 0) == SOCKET_ERROR)
 				throw SetErrorMsgText("send:", WSAGetLastError());
 
 			// Задание 14
-			receivedBytes = recv(clientSocket, receiveBuffer, sizeof(receiveBuffer), 0);
+			// ПОМЕТКА (отклонение от исходного кода): в пособии recv(..., sizeof(receiveBuffer), ...).
+			// Здесь sizeof(receiveBuffer) - 1: при полностью заполненном буфере (50/50)
+			// запись receiveBuffer[receivedBytes] = '\0' ниже вышла бы за границу массива.
+			receivedBytes = recv(clientSocket, receiveBuffer, sizeof(receiveBuffer) - 1, 0);
 			if (receivedBytes == SOCKET_ERROR)
 				throw SetErrorMsgText("recv:", WSAGetLastError());
 
