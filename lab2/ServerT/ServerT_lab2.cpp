@@ -4,8 +4,8 @@
 #include <iostream>
 #include <cstdlib>
 #include <ctime>
-#include <windows.h>
 #include "Winsock2.h"
+#include <windows.h>
 // Задание 1
 #pragma comment(lib, "WS2_32.lib")
 using namespace std;
