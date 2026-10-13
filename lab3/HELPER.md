@@ -171,19 +171,20 @@ sendto(cC, "", 1, 0, ...);
 
 Код ServerU.cpp (строки 80–124):
 ```cpp
+map<string, int> messageCounts; // счётчики сообщений: ключ — IP клиента (строка), значение — число его сообщений
+
 while (true) { // внешний цикл — ожидание следующего клиента
-    messageCount = 0;
     startTime = clock();
     while (true) { // внутренний цикл — обмен с текущим клиентом
         lb = recvfrom(sS, ibuf, sizeof(ibuf) - 1, 0, ...);
         ibuf[lb] = '\0';
         if (ibuf[0] == '\0') break; // конец обмена с этим клиентом
-        messageCount++;
+        messageCounts[inet_ntoa(clientAddress.sin_addr)]++; // счётчик по IP-адресу отправителя
         cout << "From " << inet_ntoa(clientAddress.sin_addr) << ":" << ntohs(clientAddress.sin_port) << ": " << ibuf << endl;
         sendto(sS, ibuf, lb, 0, (sockaddr*)&clientAddress, clientAddressSize);
     }
     endTime = clock();
-    // вывод статистики по клиенту
+    // статистика: messageCounts[IP] завершившегося клиента, затем messageCounts.erase(IP)
 }
 ```
 
@@ -193,7 +194,7 @@ while (true) { // внешний цикл — ожидание следующе�
 
 - **Время обмена**: замеряется через `clock()` до и после цикла обмена. Разница в тактах / `CLOCKS_PER_SEC` = секунды.
 - **Число отправленных**: `messageTotal` (ввод пользователя).
-- **Число полученных**: счётчик `receivedCount` (клиент) / `messageCount` (сервер), инкрементируемый только при успешном `recvfrom`.
+- **Число полученных**: `receivedCount` (клиент); на сервере — карта `map<string, int> messageCounts`, ключ — IP-адрес клиента (строка), значение — число принятых от него сообщений.
 - **Потери**: если `receivedCount < messageTotal` — есть потери дейтаграмм (характерно для UDP при нагрузке/буферных переполнениях).
 
 Код ClientU.cpp (строки 121–127):
