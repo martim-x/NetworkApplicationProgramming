@@ -1,0 +1,27 @@
+ SHAPE  \* MERGEFORMAT 
+//........................................................................
+try
+{//...WSAStartup(...),сС = socket(...,SOCKET_DGRAM,...)  
+  
+SOCKADDR_IN serv;              // параметры  сокета сервера
+serv.sin_family  = AF_INET;    // используется ip-адресация  
+serv.sin_port = htons(2000);   // порт 2000
+serv.sin_addr.s_addr = inet_addr("127.0.0.1"); // адрес сервера  
+char obuf[50]= "client: I here";   //буфер вывода
+int  lobuf = 0;                    //количество отправленных  
+
+if ((lobuf = sendto(cC,obuf,strlen(obuf)+1,NULL,
+                   (sockaddr*)&serv, sizeof(serv))) == SOCKET_ERROR)   
+         throw  SetErrorMsgText("recv:",WSAGetLastError());
+ //............................................................
+}
+catch (string errorMsgText)
+{cout << endl << errorMsgText;}
+//........................................................................
+
+
+
+
+
+
+

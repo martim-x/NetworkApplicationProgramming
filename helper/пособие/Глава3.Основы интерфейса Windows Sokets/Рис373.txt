@@ -1,0 +1,32 @@
+ SHAPE  \* MERGEFORMAT 
+
+//...........................................................
+#include <string>
+#include "Winsock2.h"
+#pragma comment(lib, "WS2_32.lib")
+
+int _tmain(int argc, _TCHAR* argv[])
+{
+  SOCKET  sS;           // дескриптор сокета 
+  WSADATA wsaData;  
+  try
+  {
+   if (WSAStartup(MAKEWORD(2,0), &wsaData) != 0)
+           throw  SetErrorMsgText("Startup:",WSAGetLastError());
+   if ((sS = socket(AF_INET, SOCK_STREAM, NULL))== INVALID_SOCKET) 
+           throw  SetErrorMsgText("socket:",WSAGetLastError());
+   //...........................................................
+   if (closesocket(sS)== SOCKET_ERROR)
+           throw  SetErrorMsgText("closesocket:",WSAGetLastError());
+   if (WSACleanup()== SOCKET_ERROR)         
+           throw  SetErrorMsgText("Cleanup:",WSAGetLastError());
+  }
+  catch (string errorMsgText)
+  { cout<< endl << errorMsgText;}
+return 0;              
+}
+
+
+
+
+

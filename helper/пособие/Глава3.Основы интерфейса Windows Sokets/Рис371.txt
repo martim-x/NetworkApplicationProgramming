@@ -1,0 +1,27 @@
+ SHAPE  \* MERGEFORMAT 
+
+//...........................................................
+#include <string>
+#include "Winsock2.h"
+#pragma comment(lib, "WS2_32.lib")
+
+int _tmain(int argc, _TCHAR* argv[])
+{
+  WSADATA wsaData;  
+  try
+  {
+   if (WSAStartup(MAKEWORD(2,0), &wsaData) != 0)
+           throw  SetErrorMsgText("Startup:",WSAGetLastError());
+    //...........................................................
+   if (WSACleanup()== SOCKET_ERROR)         
+           throw  SetErrorMsgText("Cleanup:",WSAGetLastError());
+  }
+  catch (string errorMsgText)
+  { cout<< endl << errorMsgText;}
+return 0;              
+}
+
+
+
+
+

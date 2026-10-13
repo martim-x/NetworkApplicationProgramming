@@ -1,0 +1,11 @@
+ SHAPE  \* MERGEFORMAT 
+typedef struct hostent {             // структура hostent  
+	   char FAR* h_name;            // имя хоста 
+        char FAR  FAR** h_aliases;   // список алиасов 
+	   short h_addrtype;            // тип адресации
+	   short h_length;              // длина адреса
+  	   char FAR  FAR** h_addr_list; // список адресов 
+                       } hostent;   
+
+
+

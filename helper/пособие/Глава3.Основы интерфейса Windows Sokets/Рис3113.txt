@@ -1,0 +1,31 @@
+ SHAPE  \* MERGEFORMAT 
+//........................................................................
+try
+{
+  //...WSAStartup(...),sS = socket(...,SOCKET_STREAM,...),bind(sS,...)  
+  //...listen(sS,...),  cS = accept(sS,...)  
+   
+ char ibuf[50],                     //буфер ввода 
+      obuf[50]= "sever: принято ";  //буфер вывода
+ int  libuf = 0,                    //количество принятых байт
+      lobuf = 0;                    //количество отправленных байь 
+ 
+ if ((libuf = recv(cS,ibuf,sizeof(ibuf),NULL)) == SOCKET_ERROR)    
+	        throw  SetErrorMsgText("recv:",WSAGetLastError());
+
+ _itoa(lobuf, obuf+sizeof("sever: принято ")-1,10);  
+  
+ if ((lobuf = send(cS,obuf,strlen(obuf)+1,NULL)) ==  SOCKET_ERROR) 
+		   throw  SetErrorMsgText("send:",WSAGetLastError());
+ //.....................................................................
+}
+catch (string errorMsgText)
+{cout << endl << errorMsgText;}
+//........................................................................
+
+
+
+
+
+
+

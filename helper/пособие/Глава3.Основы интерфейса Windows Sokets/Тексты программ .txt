@@ -1,0 +1,144 @@
+ SHAPE  \* MERGEFORMAT 
+
+ SHAPE  \* MERGEFORMAT 
+
+
+
+
+ SHAPE  \* MERGEFORMAT 
+ SHAPE  \* MERGEFORMAT  SHAPE  \* MERGEFORMAT 
+
+//........................................................................
+#include "Winsock2.h"                // заголовок  WS2_32.dll
+#pragma comment(lib, "WS2_32.lib")   // экспорт  WS2_32.dll
+//........................................................................
+
+
+
+
+
+
+
+
+// -- получить диагностирующий код ошибки
+// Назначение: функция позволяет определить причину
+//             завершения функций Winsock2 с ошибкой
+     
+int WSAGetLastError(void);      // прототип функции          
+
+// Код возврата: функция возвращает диагностический код  
+
+
+
+
+
+
+//...................................................................
+#include "Winsock2.h"
+#pragma comment(lib, "WS2_32.lib") 
+//...................................................................
+string  GetErrorMsgText(int code)    // cформировать текст ошибки 
+{
+  string msgText;   
+  switch (code)                      // проверка кода возврата  
+   {
+   case WSAEINTR:          msgText = "WSAEINTR";         break;
+   case WSAEACCES:         msgText = "WSAEACCES";        break;
+   //..........коды WSAGetLastError ..........................
+   case WSASYSCALLFAILURE: msgText = "WSASYSCALLFAILURE";break;
+   default:                msgText = "***ERROR***";      break;  
+   };
+  return msgText;
+};
+string  SetErrorMsgText(string msgText, int code)
+{return  msgText+GetErrorMsgText(code);};
+
+int main(int argc, _TCHAR* argv[])             
+{
+ //............................................................
+ try
+   {
+   //............................................................
+   if ((sS = socket(AF_INET, SOCK_STREAM, NULL))== INVALID_SOCKET) 
+             throw  SetErrorMsgText("socket:",WSAGetLastError());
+   //.............................................................
+   }
+ catch (string errorMsgText)
+     { cout<< endl << "WSAGetLastError: " << errorMsgText;}
+ 
+ //................................................................
+ return 0; 
+}
+
+
+
+
+// -- инициализировать библиотеку WS2_32.DLL
+// Назначение: функция  позволяет инициализировать 
+//             динамическую библиотеку, проверить номер
+//             версии, получение сведения о конкретной    
+//             реализации библиотеки. Функция должна быть 
+//             выполнена до использования любой функции
+//             Windows Sockets
+//
+   int WSAStartup(
+          WORD         ver,  //[in]  версия  Windows Sockets  
+	     lpWSAData    wsd   //[out] указатель на WSADATA 
+		       );
+// Код возврата: в случае успешного завершения функция 
+//               возвращает нулевое значение, в случае 
+//               возвращается не нулевое  значение       
+// Примечания: - параметр ver представляет собой два байта,
+//               содержащих номер версии Windows Sockets,
+//               причем.  старший байт содержит
+//               младший номер версии, а младший байт- 
+//               старший номер версии;
+//             - обычно параметр ver задается с попмощью макро //                MAKEWORD; 
+//             - шаблон структуры WSADATA содержится в 
+//               Winsock2.h
+
+
+
+
+
+
+//...................................................................
+#include "Winsock2.h"
+#pragma comment(lib, "WS2_32.lib") 
+//...................................................................
+string  GetErrorMsgText(int code)    // cформировать текст ошибки 
+{
+  string msgText;   
+  switch (code)                      // проверка кода возврата  
+   {
+   case WSAEINTR:          msgText = "WSAEINTR";         break;
+   case WSAEACCES:         msgText = "WSAEACCES";        break;
+   //..........коды WSAGetLastError ..........................
+   case WSASYSCALLFAILURE: msgText = "WSASYSCALLFAILURE";break;
+   default:                msgText = "***ERROR***";      break;  
+   };
+  return msgText;
+};
+string  SetErrorMsgText(string msgText, int code)
+{return  msgText+GetErrorMsgText(code);};
+
+int main(int argc, _TCHAR* argv[])             
+{
+ //............................................................
+ try
+   {
+   //............................................................
+   if ((sS = socket(AF_INET, SOCK_STREAM, NULL))== INVALID_SOCKET) 
+             throw  SetErrorMsgText("socket:",WSAGetLastError());
+   //.............................................................
+   }
+ catch (string errorMsgText)
+     { cout<< endl << "WSAGetLastError: " << errorMsgText;}
+ 
+ //................................................................
+ return 0; 
+}
+
+
+
+

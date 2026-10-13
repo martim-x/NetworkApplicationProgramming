@@ -1,0 +1,84 @@
+ SHAPE  \* MERGEFORMAT 
+
+
+WSAStartup( … )
+
+
+sS= socket(AF_INET,
+                    SOCK_DGRAM, …)
+SOCKADDR_IN  serv 
+bind(sS, serv,…) 
+
+
+
+SOCKADDR_IN  from
+char bfrom[…]
+recvfrom(sS, bfrom,…,&from,… )
+
+
+
+SOCKADDR_IN  to
+char bto[…]
+sendto(sS, bto, …, to, …) 
+
+
+
+
+closesocket(sS)
+WSACleanup()   
+
+
+
+WSAStartup( … )
+
+
+cC = socket(AF_INET,
+                    SOCK_DGRAM, …)
+
+
+
+
+
+SOCKADDR_IN  to
+char bto[…]
+sendto(cC, bto, …, to, …) 
+
+
+
+SOKADDR_IN  from
+char bfrom[…]
+recvfrom(cC, bfrom, …,&from,…)
+
+
+
+
+closesocket(cC)
+WSACleanup()   
+
+Сервер
+
+Клиент
+
+1
+
+2
+
+3
+
+4
+
+5
+
+2
+
+1
+
+3
+
+4
+
+
+5
+
+
+
