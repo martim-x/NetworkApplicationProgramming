@@ -82,6 +82,7 @@ int main()
 		{
 			SOCKADDR_IN clientAddress;
 			int clientAddressSize = sizeof(clientAddress);
+			bool sessionStarted = false; // время обмена меряется от первой дейтаграммы клиента, а не от ожидания в эфире
 			startTime = clock();
 
 			// Задание 7: обмен с клиентом до нулевого сообщения
@@ -101,6 +102,12 @@ int main()
 				// Задание 7: нулевое сообщение — конец обмена с этим клиентом
 				if (ibuf[0] == '\0')
 					break;
+
+				if (!sessionStarted)
+				{
+					startTime = clock(); // первая дейтаграмма сеанса — начало обмена
+					sessionStarted = true;
+				}
 
 				// Задание 8: счётчик по IP-адресу отправителя — сообщения чередующихся
 				// клиентов учитываются раздельно (ключ карты — IP-строка, значение — счётчик)

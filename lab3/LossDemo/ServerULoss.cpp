@@ -103,6 +103,7 @@ int main(int argc, char* argv[])
 			SOCKADDR_IN clientAddress;
 			int clientAddressSize = sizeof(clientAddress);
 			bool sessionHasDatagrams = false; // пришла ли хоть одна дейтаграмма в текущем сеансе
+			bool sessionStarted = false;      // время обработки меряется от первой дейтаграммы, а не от ожидания в эфире
 			int sessionCount = 0;
 			startTime = clock();
 
@@ -137,6 +138,12 @@ int main(int argc, char* argv[])
 
 				messageCounts[inet_ntoa(clientAddress.sin_addr)]++;
 				sessionCount++;
+
+				if (!sessionStarted)
+				{
+					startTime = clock(); // первая дейтаграмма сеанса — начало обработки
+					sessionStarted = true;
+				}
 
 				// Медленная обработка: пока сервер спит, очередь приёма
 				// переполняется, и приходящие дейтаграммы ОС отбрасывает
