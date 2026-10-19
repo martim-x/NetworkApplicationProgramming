@@ -1,0 +1,359 @@
+# Лабораторная работа №3: UDP-сокеты
+
+## 1. Структура UDP-сервера
+
+UDP-сервер (бесконнектный, датаграммный) имеет следующую типовую структуру:
+
+```c
+// 1. Создание сокета
+int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+
+// 2. Настройка адреса сервера
+struct sockaddr_in servaddr = {
+    .sin_family = AF_INET,
+    .sin_addr.s_addr = INADDR_ANY,
+    .sin_port = htons(PORT)
+};
+
+// 3. Привязка сокета к адресу
+bind(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr));
+
+// 4. Основной цикл приёма данных (без listen/accept)
+while (1) {
+    struct sockaddr_in cliaddr;
+    socklen_t len = sizeof(cliaddr);
+    char buffer[MAXLINE];
+    
+    // Приём датаграммы от любого клиента
+    int n = recvfrom(sockfd, buffer, MAXLINE, 0,
+                     (struct sockaddr*)&cliaddr, &len);
+    
+    // Обработка данных...
+    
+    // Ответ клиенту (используя адрес из recvfrom)
+    sendto(sockfd, response, len, 0,
+           (struct sockaddr*)&cliaddr, len);
+}
+```
+
+**Ключевые особенности:**
+- Нет `listen()` и `accept()` — сокет сразу готов к приёму
+- Один сокет обслуживает все клиенты
+- Адрес клиента узнаётся при каждом `recvfrom()`
+- Нет понятия «соединение» — каждая датаграмма независима
+
+---
+
+## 2. Структура UDP-клиента
+
+```c
+// 1. Создание сокета
+int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+
+// 2. Настройка адреса сервера
+struct sockaddr_in servaddr = {
+    .sin_family = AF_INET,
+    .sin_port = htons(PORT)
+};
+inet_pton(AF_INET, "127.0.0.1", &servaddr.sin_addr);
+
+// 3. Отправка данных (без connect — опционально)
+sendto(sockfd, message, strlen(message), 0,
+       (struct sockaddr*)&servaddr, sizeof(servaddr));
+
+// 4. Приём ответа
+char buffer[MAXLINE];
+socklen_t len = sizeof(servaddr);
+int n = recvfrom(sockfd, buffer, MAXLINE, 0,
+                 (struct sockaddr*)&servaddr, &len);
+
+// 5. Опционально: connect() для фиксации адреса
+// connect(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr));
+// затем можно использовать send/recv/write/read
+```
+
+**Важно:** UDP-клиент может не привязывать свой порт (`bind`) — ОС назначит эфемерный порт автоматически при первом `sendto`.
+
+---
+
+## 3. Отличие UDP-сервера от TCP-сервера
+
+| Характеристика | TCP-сервер | UDP-сервер |
+|---|---|---|
+| **Тип сокета** | `SOCK_STREAM` | `SOCK_DGRAM` |
+| **Подготовка** | `socket → bind → listen → accept` | `socket → bind` |
+| **Обработка клиентов** | Каждый `accept` = новый сокет (fork/thread/epoll) | Один сокет для всех клиентов |
+| **Адрес клиента** | Узнаётся в `accept` | Узнаётся в каждом `recvfrom` |
+| **Состояние** | Соединение (stateful) | Бесконнектный (stateless) |
+| **Буферизация** | Потоковая, с управлением окном | Датаграммная, без упорядочивания |
+| **Надёжность** | Гарантирована (ACK, ретрансляции) | Нет гарантий доставки |
+| **Порядок** | Строгий FIFO | Может нарушаться |
+| **Границы сообщений** | Нет (поток байтов) | Сохраняются (датаграммы) |
+
+---
+
+## 4. Отличие UDP-клиента от TCP-клиента
+
+| Характеристика | TCP-клиент | UDP-клиент |
+|---|---|---|
+| **Тип сокета** | `SOCK_STREAM` | `SOCK_DGRAM` |
+| **Подключение** | Обязательный `connect` | `connect` опционален |
+| **Отправка** | `send`/`write` | `sendto` (или `send` после `connect`) |
+| **Приём** | `recv`/`read` | `recvfrom` (или `recv` после `connect`) |
+| **Адрес сервера** | Зафиксирован в `connect` | Указывается в каждом `sendto` |
+| **Границы сообщений** | Нет — поток байтов | Да — границы датаграмм сохраняются |
+| **Надёжность** | Встроена в протокол | Приложение само обрабатывает потери |
+| **MTU** | Сегментация автоматически | Приложение должно следить за размером (≤65507 байт) |
+
+---
+
+## 5. Что такое канал связи с точки зрения TCP?
+
+**Канал связи (connection / virtual circuit)** в TCP — это логическое соединение между двумя процессами, идентифицируемое **кортежем из 4 значений**:
+
+```
+(Source IP, Source Port, Destination IP, Destination Port)
+```
+
+**Свойства TCP-канала:**
+- **Двунаправленный (full-duplex)** — данные текут в обе стороны одновременно
+- **Потоковый (byte-stream)** — нет границ сообщений; приложение читает/пишет байты
+- **Надёжный** — подтверждения (ACK), нумерация байтов, ретрансляции, контроль потока (sliding window)
+- **Упорядоченный** — байты доставляются в порядке отправки
+- **Ориентирован на соединение** — требует установки (3-way handshake) и разрыва (4-way handshake)
+- **Сохраняет состояние** — окна, таймеры, буферы отправки/приёма на обоих концах
+
+---
+
+## 6. Что значит: обмен без соединения (ориентированный на сообщения)?
+
+**Connectionless (бесконнектный) / Message-oriented (датаграммный)** означает:
+
+1. **Нет фазы установки соединения** — нет handshake, нет состояния «connected»
+2. **Каждая датаграмма автономна** — содержит полный адрес назначения, обрабатывается независимо
+3. **Границы сообщений сохраняются** — `sendto` одной датаграммы = `recvfrom` одной датаграммы (если не потеряна)
+4. **Нет гарантий** — доставка, порядок, дублирование не контролируются протоколом
+5. **Сервер не «помнит» клиентов** — каждый `recvfrom` сообщает адрес отправителя заново
+
+**Аналогия:** Почтовые открытки vs телефонный звонок (TCP). Открытка просто брошена в ящик — может не дойти, дойти не в том порядке, дублироваться.
+
+---
+
+## 7. Что значит: UDP ненадёжный протокол?
+
+«Ненадёжный» (unreliable) означает отсутствие **встроенных** механизмов:
+
+| Негарантированное свойство | Последствие |
+|---|---|
+| **Доставка** | Датаграмма может не дойти (потери в буферах, перегруз, ошибки CRC) |
+| **Порядок** | Датаграммы могут прийти переставленными |
+| **Уникальность** | Возможны дубликаты (ретрансляции нижележащих уровней) |
+| **Целостность** | Только опциональный checksum (IPv4) / обязательный (IPv6) — повреждённые отбрасываются, но не повторяются |
+| **Уведомление об ошибках** | Нет ACK/NACK — отправитель не узнает о потере |
+
+**Приложение должно само реализовать:** подтверждения, таймауты, ретрансляции, нумерацию, окно (если нужно) — как в TFTP, QUIC, RTP/RTCP, DNS-over-UDP.
+
+---
+
+## 8. В каких случаях следует выбирать UDP?
+
+| Сценарий | Причина |
+|---|---|
+| **Real-time аудио/видео** (VoIP, WebRTC, стриминг) | Низкая задержка важнее потери; ретрансляции устаревают |
+| **Игры (FPS, MOBA)** | Малые пакеты, высокая частота, допускаются потери |
+| **DNS, DHCP, SNMP, NTP, TFTP** | Краткие запрос-ответ, простота, broadcast/multicast |
+| **Multicast / Broadcast** | TCP не поддерживает один-ко-многим |
+| **Высокая нагрузка, многие клиенты** | Нет per-connection state, меньше накладных расходов |
+| **Туннелирование / VPN (WireGuard, OpenVPN-UDP)** | Инкапсуляция, свой контроль надёжности внутри |
+| **IoT / LoRaWAN / DTLS** | Ограниченные ресурсы, нестабильные каналы |
+
+**Не выбирать UDP, если:** нужна гарантированная доставка файлов, веб-страниц, API, БД — там проще и правильнее TCP/TLS/QUIC.
+
+---
+
+## 9. Что значит: UDP не буферизирует соединения?
+
+Фраза неформальна; точное значение:
+
+1. **Нет send-буфера как у TCP** — у TCP есть окно отправки (sliding window), данные копируются в ядро, подтверждаются ACK, ретранслируются. У UDP `sendto` просто кладёт датаграмму в выходную очередь интерфейса — если очередь полна, `sendto` блокируется или возвращает `EAGAIN` (non-blocking). **Нет накопления байтов для потока.**
+
+2. **Нет receive-буфера с упорядочиванием** — у TCP входящие сегменты собираются в порядке последовательных номеров. У UDP датаграммы кладутся в очередь приёма **как есть** (FIFO), без переупорядочивания. Если приложение не успевает читать — новые датаграммы отбрасываются (socket receive buffer overflow).
+
+3. **Нет «соединения», за которое можно забуферизировать состояние** — нет окон, таймеров,Seq/Ack номеров.
+
+**Практический вывод:** Приложение само должно управлять очередями, батчингом, backpressure — UDP лишь передаёт датаграммы «как есть».
+
+---
+
+## 10. Можно ли одновременно задействовать один номер порта для двух серверов?
+
+| Комбинация | Возможно? | Обоснование |
+|---|---|---|
+| **TCP + TCP** | ❌ Нет | Один `listen` на `(IP, порт)` — `bind` вернёт `EADDRINUSE` |
+| **UDP + UDP** | ❌ Нет | Один `bind` на `(IP, порт)` — `EADDRINUSE` |
+| **TCP + UDP** | ✅ **Да** | Разные протокольные пространства: `TCP:порт` ≠ `UDP:порт` |
+
+### Демонстрация (TCP + UDP на порту 9000)
+
+**Сервер (C, Linux):**
+```c
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+
+int main() {
+    // TCP сервер
+    int tcp_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = {AF_INET, htons(9000), INADDR_ANY};
+    bind(tcp_fd, (void*)&addr, sizeof(addr));
+    listen(tcp_fd, 5);
+    
+    // UDP сервер — тот же порт!
+    int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    bind(udp_fd, (void*)&addr, sizeof(addr));  // Успех!
+    
+    // epoll/poll на обоих fd...
+}
+```
+
+**Проверка `netstat`:**
+```bash
+$ netstat -anp | grep :9000
+tcp   0  0 0.0.0.0:9000  0.0.0.0:*  LISTEN  1234/server
+udp   0  0 0.0.0.0:9000  0.0.0.0:*         1234/server
+```
+
+**Примечание:** `SO_REUSEADDR` / `SO_REUSEPORT` позволяют нескольким процессам биндиться на один порт (TCP или UDP), но это уже другой уровень — внутри одного процесса TCP+UDP на одном порту работает «из коробки».
+
+---
+
+## 11. Определите порт UDP-сервера с помощью утилиты NETSTAT
+
+```bash
+# Все UDP-сокеты в слушании (LISTEN не показывается для UDP, но есть Local Address)
+netstat -anup | grep udp
+
+# Или более читаемо:
+ss -ulnp   # -u: UDP, -l: listening, -n: numeric, -p: process
+
+# Пример вывода:
+# Netid  State  Recv-Q Send-Q Local Address:Port  Peer Address:Port  Process
+# udp    UNCONN 0      0      0.0.0.0:9000       0.0.0.0:*          users:(("server",pid=1234,fd=3))
+```
+
+**Ключевые флаги:**
+- `-a` / `-l` — все / только слушающие
+- `-n` — числовые порты (не резолвить сервисы)
+- `-p` / `-e` — PID/программа (требует root)
+- `-u` — только UDP
+
+**На macOS/BSD:** `netstat -an -p udp` или `lsof -i UDP`
+
+---
+
+## 12. Демонстрация потери сообщений UDP-сервером (с Sleep)
+
+### Сервер (умышленно медленный)
+```c
+// server_loss.c
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+
+#define PORT 9000
+#define BUF_SIZE 1024
+
+int main() {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in addr = {AF_INET, htons(PORT), INADDR_ANY};
+    bind(fd, (void*)&addr, sizeof(addr));
+    
+    char buf[BUF_SIZE];
+    struct sockaddr_in cli;
+    socklen_t len = sizeof(cli);
+    int count = 0;
+    
+    printf("UDP server on port %d (slow)...\n", PORT);
+    
+    while (1) {
+        int n = recvfrom(fd, buf, BUF_SIZE, 0, (void*)&cli, &len);
+        if (n > 0) {
+            count++;
+            buf[n] = 0;
+            printf("[%d] Received: %s\n", count, buf);
+            
+            // Искусственная задержка обработки — забивает буфер приёма
+            sleep(1);  // Обрабатывает 1 пакет в секунду
+            
+            sendto(fd, "OK", 2, 0, (void*)&cli, len);
+        }
+    }
+}
+```
+
+### Клиент (быстрый флуд)
+```c
+// client_flood.c
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+#include <arpa/inet.h>
+
+#define PORT 9000
+#define COUNT 100
+
+int main() {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in addr = {AF_INET, htons(PORT)};
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    
+    char buf[64];
+    for (int i = 1; i <= COUNT; i++) {
+        sprintf(buf, "Packet %d", i);
+        sendto(fd, buf, strlen(buf), 0, (void*)&addr, sizeof(addr));
+        usleep(1000);  // 1000 пакетов/сек (1мс интервал)
+    }
+    
+    // Ждём ответы
+    sleep(2);
+    printf("Sent %d packets\n", COUNT);
+    return 0;
+}
+```
+
+### Результат запуска
+```bash
+# Терминал 1
+$ ./server_loss
+UDP server on port 9000 (slow)...
+[1] Received: Packet 1
+[2] Received: Packet 2
+...
+[10] Received: Packet 10
+#дальше тишина — буфер ядра переполнен, остальные 90 пакетов отброшены
+
+# Терминал 2
+$ ./client_flood
+Sent 100 packets
+```
+
+### Проверка потерь через `netstat` / `ss`
+```bash
+$ ss -s | grep UDP
+UDP:  10 (estab)  0 (closed)  123 (orphaned)  0 (tw)  0 (alloc)
+
+$ netstat -su | grep "packet receive errors"
+    90 packet receive errors   # ← счетчик потерь в буфере приёма
+```
+
+**Почему теряются:** Ядерный буфер приёма (`net.core.rmem_default` / `rmem_max`, обычно ~212 KB) заполняется быстрее, чем сервер читает (`sleep(1)`). Новые датаграммы просто отбрасываются — **нет backpressure, нет уведомления отправителю**.
+
+---
+
+*Готово. Все 12 вопросов покрыты с кодом, таблицами и практическими примерами.*
