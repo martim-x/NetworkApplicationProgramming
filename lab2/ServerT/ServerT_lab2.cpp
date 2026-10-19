@@ -1,7 +1,7 @@
-// Лабораторная работа № 2. Обмен данными по TCP-соединению
-// Серверная часть (ServerT). Задания 1-6, 10, 11, 14, 15
-// ПОМЕТКА (отклонение от исходного кода): VS помечает inet_ntoa как deprecated
-// (рекомендует inet_ntop). Код пособия оставлен как есть — предупреждение отключено макросом.
+
+
+
+
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <string>
 #include <iostream>
@@ -9,11 +9,11 @@
 #include <ctime>
 #include "Winsock2.h"
 #include <windows.h>
-// Задание 1
+
 #pragma comment(lib, "WS2_32.lib")
 using namespace std;
 
-// Задание 2
+
 string GetErrorMsgText(int code)
 {
 	switch (code)
@@ -38,7 +38,7 @@ string GetErrorMsgText(int code)
 	}
 }
 
-// Задание 2
+
 string SetErrorMsgText(string msgText, int code)
 {
 	return msgText + GetErrorMsgText(code);
@@ -46,7 +46,7 @@ string SetErrorMsgText(string msgText, int code)
 
 int main(int argc, char* argv[])
 {
-	// Задание 5
+	
 	int port = (argc > 1) ? atoi(argv[1]) : 2000;
 
 	SOCKET listenSocket;
@@ -59,15 +59,15 @@ int main(int argc, char* argv[])
 
 	try
 	{
-		// Задание 3
+		
 		if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
 			throw SetErrorMsgText("Startup:", WSAGetLastError());
 
-		// Задание 4
+		
 		if ((listenSocket = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
 			throw SetErrorMsgText("socket:", WSAGetLastError());
 
-		// Задание 5
+		
 		SOCKADDR_IN serverAddress;
 		serverAddress.sin_family = AF_INET;
 		serverAddress.sin_port = htons(port);
@@ -81,36 +81,36 @@ int main(int argc, char* argv[])
 
 		cout << "ServerT: waiting for clients on port " << port << "..." << endl;
 
-		// Задание 15
+		
 		while (true)
 		{
 			SOCKADDR_IN clientAddress;
 			int clientAddressSize = sizeof(clientAddress);
 
-			// Задание 6
+			
 			clientSocket = accept(listenSocket, (sockaddr*)&clientAddress, &clientAddressSize);
 			if (clientSocket == INVALID_SOCKET)
 				throw SetErrorMsgText("accept:", WSAGetLastError());
 
-			// Задание 10
+			
 			cout << "\nClient connected." << endl;
 			cout << "Client IP:    " << inet_ntoa(clientAddress.sin_addr) << endl;
 			cout << "Client port:  " << ntohs(clientAddress.sin_port) << "\n\n";
 
-			// Задания 11, 14
+			
 			messageCount = 0;
 			startTime = clock();
 			while (true)
 			{
-				// Задание 11
-				// ПОМЕТКА (отклонение от исходного кода): в пособии recv(..., sizeof(buffer), ...).
-				// Здесь sizeof(buffer) - 1: если recv заполнит все 50 байт, то
-				// buffer[receivedBytes] = '\0' ниже записал бы buffer[50] — за границей массива.
+				
+				
+				
+				
 				receivedBytes = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
 				if (receivedBytes == SOCKET_ERROR)
 					throw SetErrorMsgText("recv:", WSAGetLastError());
 
-				// Задание 14
+				
 				if (receivedBytes == 0)
 					break;
 
@@ -118,7 +118,7 @@ int main(int argc, char* argv[])
 				messageCount++;
 				cout << "Received: " << buffer << endl;
 
-				// Задание 14
+				
 				if (send(clientSocket, buffer, receivedBytes, 0) == SOCKET_ERROR)
 					throw SetErrorMsgText("send:", WSAGetLastError());
 			}
@@ -128,7 +128,7 @@ int main(int argc, char* argv[])
 			cout << "Exchange time: " << ((double)(endTime - startTime)) / CLOCKS_PER_SEC
 				<< " seconds.\n" << endl;
 
-			// Задание 15
+			
 			if (closesocket(clientSocket) == SOCKET_ERROR)
 				throw SetErrorMsgText("closesocket:", WSAGetLastError());
 		}

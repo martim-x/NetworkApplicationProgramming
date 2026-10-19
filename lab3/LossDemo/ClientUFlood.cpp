@@ -1,15 +1,15 @@
-// Лабораторная работа № 3. Демонстрация потери сообщений UDP-сервером (вопрос 12)
-// ClientUFlood: штормовой клиент — посылает N дейтаграмм подряд, НЕ ожидая
-// эхо-ответов (fire-and-forget). Медленный сервер (ServerULoss, Sleep на каждое
-// сообщение) не успевает вынимать дейтаграммы из очереди приёма — она
-// переполняется, и ОС теряет всё, что не поместилось.
-// Почему клиент не ждёт ответ: в режиме «отправил – принял» (задание 7) в полёте
-// всегда максимум одна дейтаграмма, очередь сервера переполниться не может и
-// потерь не бывает. Замер времени здесь — только на фазе отправки: клиент
-// печатает, за сколько отправил N дейтаграмм. Сколько реально принял сервер —
-// печатает сервер; разность и есть потерянные дейтаграммы. Потоки не нужны:
-// каждая сторона меряет свою фазу, параллельного замера нет.
-// Запуск: ClientUFlood [ip] [порт] [число_сообщений]  (по умолчанию 127.0.0.1 2000 5000)
+
+
+
+
+
+
+
+
+
+
+
+
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
 #include <string>
@@ -18,11 +18,11 @@
 #include <cstdlib>
 #include <ctime>
 #include "Winsock2.h"
-#include <windows.h> // Sleep
+#include <windows.h> 
 #pragma comment(lib, "WS2_32.lib")
 using namespace std;
 
-// Функции обработки ошибок из практической работы № 2
+
 string GetErrorMsgText(int code)
 {
 	switch (code)
@@ -68,7 +68,7 @@ int main(int argc, char* argv[])
 		if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
 			throw SetErrorMsgText("Startup:", WSAGetLastError());
 
-		// bind не нужен — Windows выделяет клиенту эфемерный порт
+		
 		if ((cC = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET)
 			throw SetErrorMsgText("socket:", WSAGetLastError());
 
@@ -80,8 +80,8 @@ int main(int argc, char* argv[])
 		cout << "ClientUFlood: sending " << messageTotal << " datagrams to "
 			<< serverIp << ":" << serverPort << " (fire-and-forget, echoes are not read)..." << endl;
 
-		// Штормовая отправка: без recvfrom между sendto, очередь сервера
-		// не успевает опустошаться и переполняется
+		
+		
 		startTime = clock();
 		for (int i = 1; i <= messageTotal; i++)
 		{
@@ -96,9 +96,9 @@ int main(int argc, char* argv[])
 		cout << "Sent " << messageTotal << " datagrams in " << seconds << " seconds"
 			<< " (" << (int)(messageTotal / (seconds > 0.001 ? seconds : 0.001)) << " per second)." << endl;
 
-		// Даём серверу доразобрать остаток очереди, прежде чем закрыть порт:
-		// иначе его эхо уйдёт в закрытый порт (на сервере это обработано как
-		// WSAECONNRESET, но лучше не провоцировать)
+		
+		
+		
 		cout << "Waiting 15 seconds for the server to drain its queue..." << endl;
 		Sleep(15000);
 
