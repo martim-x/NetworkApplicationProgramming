@@ -18,6 +18,8 @@ struct ListContact
 	DWORD startedAt;
 	int messageCount;
 	char request[32];
+	char pending[MESSAGE_SIZE];
+	int pendingBytes;
 };
 
 struct StatsInfo

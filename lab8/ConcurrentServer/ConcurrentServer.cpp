@@ -222,6 +222,9 @@ static ListContact* AddContact(SOCKET client, const SOCKADDR_IN& address)
 			contacts[i].finished = 0;
 			contacts[i].startedAt = GetTickCount();
 			contacts[i].messageCount = 0;
+			contacts[i].pendingBytes = 0;
+			memset(contacts[i].pending, 0, sizeof(contacts[i].pending));
+			memset(contacts[i].request, 0, sizeof(contacts[i].request));
 			result = &contacts[i];
 			break;
 		}
@@ -375,6 +378,15 @@ static DWORD WINAPI DispatchServer(LPVOID)
 			InterlockedExchange(&contact.busy, 1);
 			strcpy_s(contact.request, buffer);
 			contact.messageCount = 1;
+
+			contact.pendingBytes = 0;
+			int codeLength = (int)strlen(buffer);
+
+			if (codeLength + 1 < bytes)
+			{
+				contact.pendingBytes = bytes - codeLength - 1;
+				memcpy(contact.pending, buffer + codeLength + 1, contact.pendingBytes);
+			}
 
 			Log("DispatchServer: запрос \"" + string(buffer) + "\" от " +
 				EndpointToString(contact.address) + " — запуск обслуживающего потока");

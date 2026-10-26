@@ -42,6 +42,17 @@ static DWORD WINAPI EchoServer(LPVOID param)
 
 	Log("  EchoServer: обслуживание клиента начато");
 
+	if (contact->pendingBytes > 0)
+	{
+		contact->messageCount++;
+
+		if (send(contact->socket, contact->pending, contact->pendingBytes, 0) == SOCKET_ERROR)
+		{
+			InterlockedExchange(&contact->finished, 1);
+			return 0;
+		}
+	}
+
 	while (true)
 	{
 		int bytes = recv(contact->socket, buffer, sizeof(buffer) - 1, 0);
