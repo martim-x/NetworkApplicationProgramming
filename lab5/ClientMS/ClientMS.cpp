@@ -45,13 +45,13 @@ string SetErrorMsgText(string msgText, int code)
 
 int main(int argc, char* argv[])
 {
-	const char* mailslotName = (argc > 1) ? argv[1] : "\\\\*\\mailslot\\Box";
+	const char* mailslotName = (argc > 1) ? argv[1] : "\\\\.\\mailslot\\Box";
 
 	HANDLE hMailslot;
 	WSADATA wsaData;
 	char sendBuffer[512];
 	DWORD bytesWritten;
-	int messageTotal;
+	int messageTotal = (argc > 2) ? atoi(argv[2]) : 0;
 	clock_t startTime, endTime;
 
 	try
@@ -72,14 +72,20 @@ int main(int argc, char* argv[])
 
 		cout << "Connected to mailslot." << endl;
 
-		cout << "Enter number of messages: ";
-		cin >> messageTotal;
+		if (messageTotal <= 0)
+		{
+			cout << "Enter number of messages: ";
+			cin >> messageTotal;
+		}
 
-		strcpy(sendBuffer, "Hello from ClientMS");
+		if (messageTotal <= 0)
+			messageTotal = 1;
 
 		startTime = clock();
 		for (int i = 1; i <= messageTotal; i++)
 		{
+			sprintf_s(sendBuffer, "Hello from ClientMS %03d", i);
+
 			if (!WriteFile(hMailslot, sendBuffer, (DWORD)(strlen(sendBuffer) + 1), &bytesWritten, NULL))
 				throw SetErrorMsgText("WriteFile:", GetLastError());
 
