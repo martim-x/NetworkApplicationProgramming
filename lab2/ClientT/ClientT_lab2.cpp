@@ -58,7 +58,7 @@ int main(int argc, char* argv[])
 	char receiveBuffer[50];
 	char sendBuffer[50];
 	int receivedBytes;
-	int messageTotal;
+	int messageTotal = (argc > 3) ? atoi(argv[3]) : 0;
 	int messageNumber = 1;
 	clock_t startTime, endTime;
 
@@ -84,8 +84,11 @@ int main(int argc, char* argv[])
 			throw SetErrorMsgText("connect:", WSAGetLastError());
 
 		
-		cout << "Enter number of messages: ";
-		cin >> messageTotal;
+		if (messageTotal <= 0)
+		{
+			cout << "Enter number of messages: ";
+			cin >> messageTotal;
+		}
 
 		
 		startTime = clock();

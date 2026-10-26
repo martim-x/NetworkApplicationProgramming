@@ -537,7 +537,7 @@ g++ -std=c++17 -o ServerT.exe ServerT/ServerT_lab2.cpp -lws2_32
 g++ -std=c++17 -o ClientT.exe ClientT/ClientT_lab2.cpp -lws2_32
 
 ServerT.exe [порт]                     # по умолчанию 2000
-ClientT.exe [IP-сервера] [порт]        # по умолчанию 127.0.0.1 2000 (петля)
+ClientT.exe [IP-сервера] [порт] [сообщений]   # по умолчанию 127.0.0.1 2000, количество спрашивается, если не задано
 ```
 
 Во время обмена `netstat -a` показывает пару ESTABLISHED-строк на соединение
