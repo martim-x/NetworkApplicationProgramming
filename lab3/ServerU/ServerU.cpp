@@ -45,8 +45,10 @@ string SetErrorMsgText(string msgText, int code)
 	return msgText + GetErrorMsgText(code);
 }
 
-int main()
+int main(int argc, char* argv[])
 {
+	int port = (argc > 1) ? atoi(argv[1]) : 2000;
+
 	SOCKET sS;
 	WSADATA wsaData;
 	char ibuf[50];
@@ -68,13 +70,13 @@ int main()
 		
 		SOCKADDR_IN serverAddress;
 		serverAddress.sin_family = AF_INET;
-		serverAddress.sin_port = htons(2000);
+		serverAddress.sin_port = htons((short)port);
 		serverAddress.sin_addr.s_addr = INADDR_ANY;
 
 		if (bind(sS, (sockaddr*)&serverAddress, sizeof(serverAddress)) == SOCKET_ERROR)
 			throw SetErrorMsgText("bind:", WSAGetLastError());
 
-		cout << "ServerU: waiting for datagrams on port 2000..." << endl;
+		cout << "ServerU: waiting for datagrams on port " << port << "..." << endl;
 
 		
 		

@@ -271,7 +271,7 @@ g++ -std=c++17 -o ClientU.exe ClientU/ClientU.cpp -lws2_32
 ServerU.exe [порт]              # по умолчанию 2000
 
 # Запуск клиента (терминал 2)
-ClientU.exe [IP-сервера] [порт] # по умолчанию 127.0.0.1 2000 (loopback)
+ClientU.exe [IP-сервера] [порт] [сообщений] # по умолчанию 127.0.0.1 2000, количество спрашивается, если не задано
 
 # Пример сессии:
 # ServerU: waiting for datagrams on port 2000...

@@ -61,7 +61,7 @@ int main(int argc, char* argv[])
 	char sendBuffer[50];
 	int lb;
 	int serverAddressSize;
-	int messageTotal;
+	int messageTotal = (argc > 3) ? atoi(argv[3]) : 0;
 	int receivedCount;
 	clock_t startTime, endTime;
 
@@ -84,8 +84,11 @@ int main(int argc, char* argv[])
 		serverAddressSize = sizeof(serverAddress);
 
 		
-		cout << "Enter number of messages: ";
-		cin >> messageTotal;
+		if (messageTotal <= 0)
+		{
+			cout << "Enter number of messages: ";
+			cin >> messageTotal;
+		}
 
 		
 		receivedCount = 0;
