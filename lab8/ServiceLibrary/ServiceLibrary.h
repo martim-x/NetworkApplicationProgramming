@@ -13,6 +13,7 @@ struct ListContact
 	SOCKADDR_IN address;
 	HANDLE serviceThread;
 	HANDLE acceptThread;
+	HANDLE watchdog;
 	volatile LONG busy;
 	volatile LONG finished;
 	DWORD startedAt;

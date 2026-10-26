@@ -9,6 +9,7 @@ cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming"
 if not exist lab8\build mkdir lab8\build
 cl /nologo /EHsc /utf-8 /W3 /LD lab8\ServiceLibrary\ServiceLibrary.cpp /Fe:lab8\build\ServiceLibrary.dll
 cl /nologo /EHsc /utf-8 /W3 lab8\ConcurrentServer\ConcurrentServer.cpp /Fe:lab8\build\ConcurrentServer.exe
+cl /nologo /EHsc /utf-8 /W3 lab8\ClientTy\ClientTy.cpp /Fe:lab8\build\ClientTy.exe
 ```
 
 | Ключ | Что делает |
@@ -28,7 +29,7 @@ cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming\
 ConcurrentServer.exe 9301 ServiceLibrary.dll \\.\pipe\TestConsole 9300 TestServer
 ```
 
-Аргументы: `[TCP-порт] [DLL] [имя канала] [UDP-порт] [позывной]`. По умолчанию — `2000 ServiceLibrary.dll \\.\pipe\ConcurrentServer 9200 ConcurrentServer`.
+Аргументы: `[TCP-порт] [DLL] [имя канала] [UDP-порт] [позывной] [лимит обслуживания мс]`. По умолчанию — `2000 ServiceLibrary.dll \\.\pipe\ConcurrentServer 9200 ConcurrentServer 60000`.
 
 Ожидаемый вывод:
 
@@ -106,6 +107,36 @@ ClientB.exe TestServer 9300
 
 Ожидаемо: `Сервер найден: <IP>:9300`.
 
+## 5a. Watchdog: лимит времени обслуживания (задание 20)
+
+```cmd
+ConcurrentServer.exe 9301 ServiceLibrary.dll \\.\pipe\TestConsole 9300 TestServer 3000
+```
+
+| Параметр | Что означает |
+|---|---|
+| 6-й аргумент | лимит обслуживания одного клиента, мс; по умолчанию 60 000 |
+| `CreateWaitableTimer` + `SetWaitableTimer` | ожидающий таймер сеанса, взводится на лимит |
+| `WaitForMultipleObjects` в потоке `Watchdog` | ожидание набора таймеров активных сеансов |
+| `TerminateThread` | принудительное завершение зациклившегося потока (как требует задание) |
+| `CancelWaitableTimer` в `GarbageCleaner` | отмена таймера при нормальном завершении |
+
+Проверка: подключиться, отправить `echo` и замолчать дольше лимита. В журнале:
+
+```
+Watchdog: клиент 127.0.0.1:59781 превысил лимит 3000 мс — поток завершается принудительно
+```
+
+Слот освобождается, следующий клиент обслуживается нормально.
+
+## 5b. ClientTy: нагрузка подключениями (задание 17)
+
+```cmd
+ClientTy.exe 127.0.0.1 9301 20 50
+```
+
+Аргументы: `[IP] [порт] [циклов] [задержка мс]`. Ожидаемо: `успешных циклов 20 из 20, сбоев 0, время 1.516 с` — в журнале сервера столько же сеансов `APC … завершение обслуживания`.
+
 ## 6. Разбор ошибок
 
 | Сообщение | Причина | Лечение |
@@ -117,3 +148,5 @@ ClientB.exe TestServer 9300
 | клиент получает `ErrorInquiry` | первое сообщение не `echo`/`time`/`rand` | отправить корректный код запроса |
 | сеанс `echo` не завершается | клиент не закрыл сокет и не отправил пустое сообщение | закрыть сокет или отправить `\0` |
 | сервер не реагирует на `stop` | команда отправлена не в тот канал | имя канала — третий аргумент `ConcurrentServer` |
+| `Watchdog: … превысил лимит … поток завершается принудительно` | обслуживание клиента дольше 6-го аргумента | увеличить лимит или разобраться, почему клиент молчит |
+| `ClientTy: connect: WSAECONNREFUSED` | сервер не запущен или другой порт | запустить сервер, сверить второй аргумент |

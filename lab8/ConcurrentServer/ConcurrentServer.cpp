@@ -30,6 +30,8 @@ static HANDLE acceptThreadHandle = NULL;
 static char command[COMMAND_SIZE] = "start";
 static volatile LONG accepting = 1;
 static volatile LONG serverExit = 0;
+static int serviceTimeoutMs = 60000;
+static int lastPriorityLevel = -1;
 static FNSSS SSS = NULL;
 static FNFindService FindService = NULL;
 
@@ -218,6 +220,7 @@ static ListContact* AddContact(SOCKET client, const SOCKADDR_IN& address)
 			contacts[i].address = address;
 			contacts[i].serviceThread = NULL;
 			contacts[i].acceptThread = acceptThreadHandle;
+			contacts[i].watchdog = NULL;
 			contacts[i].busy = 0;
 			contacts[i].finished = 0;
 			contacts[i].startedAt = GetTickCount();
@@ -404,12 +407,121 @@ static DWORD WINAPI DispatchServer(LPVOID)
 
 			if (acceptThreadHandle != NULL)
 				QueueUserAPC(StartServiceAPC, acceptThreadHandle, (ULONG_PTR)i);
+
+			if (contact.watchdog != NULL)
+			{
+				CancelWaitableTimer(contact.watchdog);
+				CloseHandle(contact.watchdog);
+				contact.watchdog = NULL;
+			}
+
+			HANDLE watchdog = CreateWaitableTimerA(NULL, FALSE, NULL);
+
+			if (watchdog != NULL)
+			{
+				LARGE_INTEGER dueTime;
+				dueTime.QuadPart = -((LONGLONG)serviceTimeoutMs * 10000);
+
+				if (SetWaitableTimer(watchdog, &dueTime, 0, NULL, NULL, FALSE))
+					contact.watchdog = watchdog;
+				else
+					CloseHandle(watchdog);
+			}
 		}
 
 		LeaveCriticalSection(&contactLock);
 	}
 
 	Log("DispatchServer: завершён");
+	return 0;
+}
+
+static void UpdatePriorities()
+{
+	int active = stats.activeConnections;
+	int level = (active > 2) ? 1 : 0;
+
+	if (level == lastPriorityLevel)
+		return;
+
+	lastPriorityLevel = level;
+	int priority = (level == 1) ? THREAD_PRIORITY_BELOW_NORMAL : THREAD_PRIORITY_NORMAL;
+
+	EnterCriticalSection(&contactLock);
+
+	for (int i = 0; i < MAX_CONTACTS; i++)
+	{
+		if (contacts[i].socket != INVALID_SOCKET && contacts[i].serviceThread != NULL)
+			SetThreadPriority(contacts[i].serviceThread, priority);
+	}
+
+	LeaveCriticalSection(&contactLock);
+
+	Log("Диспетчер приоритетов: активных сеансов " + to_string(active) +
+		", приоритет обслуживающих потоков " + ((level == 1) ? "BELOW_NORMAL" : "NORMAL"));
+}
+
+static DWORD WINAPI Watchdog(LPVOID)
+{
+	Log("Watchdog: запущен, лимит обслуживания клиента " + to_string(serviceTimeoutMs) + " мс");
+
+	while (!serverExit)
+	{
+		HANDLE timers[MAX_CONTACTS];
+		int indexes[MAX_CONTACTS];
+		int count = 0;
+
+		EnterCriticalSection(&contactLock);
+
+		for (int i = 0; i < MAX_CONTACTS; i++)
+		{
+			ListContact& contact = contacts[i];
+
+			if (contact.socket != INVALID_SOCKET && contact.watchdog != NULL && !contact.finished)
+			{
+				timers[count] = contact.watchdog;
+				indexes[count] = i;
+				count++;
+			}
+		}
+
+		LeaveCriticalSection(&contactLock);
+
+		if (count == 0)
+		{
+			Sleep(50);
+			continue;
+		}
+
+		DWORD waitResult = WaitForMultipleObjects(count, timers, FALSE, 200);
+
+		if (waitResult >= WAIT_OBJECT_0 && waitResult < WAIT_OBJECT_0 + count)
+		{
+			int index = indexes[waitResult - WAIT_OBJECT_0];
+
+			EnterCriticalSection(&contactLock);
+			ListContact& contact = contacts[index];
+
+			if (contact.socket != INVALID_SOCKET && !contact.finished && contact.serviceThread != NULL)
+			{
+				Log("Watchdog: клиент " + EndpointToString(contact.address) +
+					" превысил лимит " + to_string(serviceTimeoutMs) + " мс — поток завершается принудительно");
+				TerminateThread(contact.serviceThread, 1);
+				InterlockedIncrement(&stats.refusedConnections);
+				InterlockedExchange(&contact.finished, 1);
+			}
+
+			if (contact.watchdog != NULL)
+			{
+				CloseHandle(contact.watchdog);
+				contact.watchdog = NULL;
+			}
+
+			LeaveCriticalSection(&contactLock);
+		}
+	}
+
+	Log("Watchdog: завершён");
 	return 0;
 }
 
@@ -420,6 +532,7 @@ static DWORD WINAPI GarbageCleaner(LPVOID)
 	while (!serverExit)
 	{
 		Sleep(100);
+		UpdatePriorities();
 
 		EnterCriticalSection(&contactLock);
 
@@ -438,6 +551,13 @@ static DWORD WINAPI GarbageCleaner(LPVOID)
 				WaitForSingleObject(contact.serviceThread, 200);
 				CloseHandle(contact.serviceThread);
 				contact.serviceThread = NULL;
+			}
+
+			if (contact.watchdog != NULL)
+			{
+				CancelWaitableTimer(contact.watchdog);
+				CloseHandle(contact.watchdog);
+				contact.watchdog = NULL;
 			}
 
 			closesocket(contact.socket);
@@ -620,6 +740,7 @@ int main(int argc, char* argv[])
 	strcpy_s(config.pipeName, (argc > 3) ? argv[3] : "\\\\.\\pipe\\ConcurrentServer");
 	config.responsePort = (argc > 4) ? atoi(argv[4]) : 9200;
 	strcpy_s(config.callSign, (argc > 5) ? argv[5] : "ConcurrentServer");
+	serviceTimeoutMs = (argc > 6) ? atoi(argv[6]) : 60000;
 
 	WSADATA wsaData;
 	HMODULE library = NULL;
@@ -682,6 +803,7 @@ int main(int argc, char* argv[])
 	threads[threadsCount++] = CreateThread(NULL, 0, ConsolePipe, NULL, 0, NULL);
 
 	HANDLE responseThread = CreateThread(NULL, 0, ResponseServer, NULL, 0, NULL);
+	HANDLE watchdogThread = CreateThread(NULL, 0, Watchdog, NULL, 0, NULL);
 
 	while (!serverExit)
 		Sleep(50);
@@ -693,11 +815,13 @@ int main(int argc, char* argv[])
 	WaitForSingleObject(threads[2], 5000);
 	WaitForSingleObject(threads[3], 5000);
 	WaitForSingleObject(responseThread, 5000);
+	WaitForSingleObject(watchdogThread, 5000);
 
 	for (int i = 0; i < threadsCount; i++)
 		CloseHandle(threads[i]);
 
 	CloseHandle(responseThread);
+	CloseHandle(watchdogThread);
 
 	for (int i = 0; i < MAX_CONTACTS; i++)
 	{
