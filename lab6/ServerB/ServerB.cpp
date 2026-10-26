@@ -111,11 +111,16 @@ bool GetRequestFromClient(char* name, short port, struct sockaddr* from, int* fl
 	if (bind(sS, (LPSOCKADDR)&serv, sizeof(serv)) == SOCKET_ERROR)
 		throw SetErrorMsgText("bind: ", WSAGetLastError());
 
+	u_long nonBlocking = 1;
+	if (ioctlsocket(sS, FIONBIO, &nonBlocking) == SOCKET_ERROR)
+		throw SetErrorMsgText("ioctlsocket FIONBIO: ", WSAGetLastError());
+
+	DWORD start = GetTickCount();
 	char ibuf[64];
 
 	try
 	{
-		while (true)
+		while (GetTickCount() - start < 3000)
 		{
 			memset(ibuf, 0, sizeof(ibuf));
 			int libuf = recvfrom(sS, ibuf, sizeof(ibuf) - 1, 0, from, flen);
@@ -123,11 +128,13 @@ bool GetRequestFromClient(char* name, short port, struct sockaddr* from, int* fl
 			if (libuf == SOCKET_ERROR)
 			{
 				int err = WSAGetLastError();
-				if (err == WSAETIMEDOUT)
+
+				if (err == WSAEWOULDBLOCK)
 				{
-					closesocket(sS);
-					return false;
+					Sleep(10);
+					continue;
 				}
+
 				throw SetErrorMsgText("recvfrom: ", err);
 			}
 
@@ -139,6 +146,9 @@ bool GetRequestFromClient(char* name, short port, struct sockaddr* from, int* fl
 
 			cout << "  отклонён чужой запрос: \"" << ibuf << "\"" << endl;
 		}
+
+		closesocket(sS);
+		return false;
 	}
 	catch (string)
 	{
@@ -153,16 +163,32 @@ bool PutAnswerToClient(char* name, struct sockaddr* to, int* lto)
 	if ((sS = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET)
 		throw SetErrorMsgText("socket: ", WSAGetLastError());
 
-	int libuf = sendto(sS, name, (int)strlen(name) + 1, 0, to, *lto);
-	if (libuf == SOCKET_ERROR)
+	u_long nonBlocking = 1;
+	ioctlsocket(sS, FIONBIO, &nonBlocking);
+
+	for (int attempt = 0; attempt < 50; attempt++)
 	{
+		int libuf = sendto(sS, name, (int)strlen(name) + 1, 0, to, *lto);
+
+		if (libuf != SOCKET_ERROR)
+		{
+			closesocket(sS);
+			return true;
+		}
+
 		int err = WSAGetLastError();
-		closesocket(sS);
-		throw SetErrorMsgText("sendto: ", err);
+
+		if (err != WSAEWOULDBLOCK)
+		{
+			closesocket(sS);
+			throw SetErrorMsgText("sendto: ", err);
+		}
+
+		Sleep(10);
 	}
 
 	closesocket(sS);
-	return true;
+	return false;
 }
 
 int CountServers(char* call, short port, const char* broadcastAddress)
