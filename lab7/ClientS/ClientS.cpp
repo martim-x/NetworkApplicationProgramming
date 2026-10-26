@@ -54,7 +54,7 @@ bool GetServerByName(char* name, char* call, struct sockaddr* from, int* flen)
 	if ((sS = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET)
 		throw SetErrorMsgText("socket: ", WSAGetLastError());
 
-	int timeout = 3000;
+	int timeout = 1000;
 	if (setsockopt(sS, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout)) == SOCKET_ERROR)
 	{
 		int err = WSAGetLastError();
@@ -75,40 +75,50 @@ bool GetServerByName(char* name, char* call, struct sockaddr* from, int* flen)
 	cout << "Имя \"" << name << "\" разрешено в адрес "
 		<< inet_ntoa(*(in_addr*)host->h_addr_list[0]) << endl;
 
-	SOCKADDR_IN server;
-	memcpy(&server, from, sizeof(server));
-	server.sin_family = AF_INET;
-	memcpy(&server.sin_addr, host->h_addr_list[0], host->h_length);
-
-	if (sendto(sS, call, (int)strlen(call) + 1, 0, (sockaddr*)&server, sizeof(server)) == SOCKET_ERROR)
-	{
-		int err = WSAGetLastError();
-		closesocket(sS);
-		throw SetErrorMsgText("sendto: ", err);
-	}
-
 	char ibuf[64];
-	memset(ibuf, 0, sizeof(ibuf));
 
-	int libuf = recvfrom(sS, ibuf, sizeof(ibuf) - 1, 0, from, flen);
-	if (libuf == SOCKET_ERROR)
+	for (int i = 0; host->h_addr_list[i] != NULL; i++)
 	{
-		int err = WSAGetLastError();
-		closesocket(sS);
-		if (err == WSAETIMEDOUT)
-			return false;
-		throw SetErrorMsgText("recvfrom: ", err);
+		SOCKADDR_IN server;
+		memcpy(&server, from, sizeof(server));
+		server.sin_family = AF_INET;
+		memcpy(&server.sin_addr, host->h_addr_list[i], host->h_length);
+
+		cout << "  попытка адреса " << inet_ntoa(server.sin_addr) << endl;
+
+		if (sendto(sS, call, (int)strlen(call) + 1, 0, (sockaddr*)&server, sizeof(server)) == SOCKET_ERROR)
+		{
+			int err = WSAGetLastError();
+			closesocket(sS);
+			throw SetErrorMsgText("sendto: ", err);
+		}
+
+		memset(ibuf, 0, sizeof(ibuf));
+
+		int libuf = recvfrom(sS, ibuf, sizeof(ibuf) - 1, 0, from, flen);
+
+		if (libuf == SOCKET_ERROR)
+		{
+			int err = WSAGetLastError();
+
+			if (err == WSAETIMEDOUT || err == WSAECONNRESET)
+				continue;
+
+			closesocket(sS);
+			throw SetErrorMsgText("recvfrom: ", err);
+		}
+
+		cout << "Получен отклик: \"" << ibuf << "\"" << endl;
+
+		if (strcmp(ibuf, call) == 0)
+		{
+			closesocket(sS);
+			return true;
+		}
+
+		memset(from, 0, *flen);
 	}
 
-	cout << "Получен отклик: \"" << ibuf << "\"" << endl;
-
-	if (strcmp(ibuf, call) == 0)
-	{
-		closesocket(sS);
-		return true;
-	}
-
-	memset(from, 0, *flen);
 	closesocket(sS);
 	return false;
 }
