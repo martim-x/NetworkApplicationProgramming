@@ -1,101 +1,127 @@
-# ЛР6 — команды сборки и запуска (широковещательные адреса)
+# ЛР6 — команды для сборки и запуска (Named Pipe)
 
-Все команды — из корня репозитория, в консоли с окружением MSVC (`vcvars64.bat`).
+Сборка выполняется в консоли разработчика Visual Studio (`x64 Native Tools Command Prompt for VS`) или через `vcvars64.bat`. Все команды — из корня репозитория.
 
-## 1. Сборка
+## 1. Сборка всех четырёх приложений
 
 ```cmd
 cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming"
 if not exist lab6\build mkdir lab6\build
-cl /nologo /EHsc /utf-8 /W3 lab6\ServerB\ServerB.cpp /Fe:lab6\build\ServerB.exe
-cl /nologo /EHsc /utf-8 /W3 lab6\ClientB\ClientB.cpp /Fe:lab6\build\ClientB.exe
+cl /nologo /EHsc /utf-8 /W3 lab6\ServerNP\ServerNP.cpp /Fe:lab6\build\ServerNP.exe
+cl /nologo /EHsc /utf-8 /W3 lab6\ClientNP\ClientNP.cpp /Fe:lab6\build\ClientNP.exe
+cl /nologo /EHsc /utf-8 /W3 lab6\ClientNPt\ClientNPt.cpp /Fe:lab6\build\ClientNPt.exe
+cl /nologo /EHsc /utf-8 /W3 lab6\ClientNPct\ClientNPct.cpp /Fe:lab6\build\ClientNPct.exe
 ```
 
 | Ключ | Что делает |
 |---|---|
-| `/EHsc` | стандартная обработка исключений C++ — нужна для `throw string` в обработчиках ошибок |
-| `/utf-8` | исходник в UTF-8; без флага MSVC читает его как cp1251 и русский текст в строках ломается |
-| `/W3` | уровень предупреждений (на этом коде предупреждений нет) |
-| `/Fe:` | имя выходного exe |
+| `/EHsc` | включает стандартную обработку исключений C++ — без неё `throw string` в наших обработчиках ошибок не разворачивает стек корректно |
+| `/utf-8` | исходники в UTF-8 без BOM: без флага MSVC читает их как ANSI (cp1251) и русский текст в строках превращается в мусор |
+| `/W3` | уровень предупреждений; на этом коде предупреждений нет |
+| `/Fe:` | имя выходного exe; объектные файлы кладутся рядом |
+| `/nologo` | убирает баннер компилятора из вывода |
 
-Дополнительно линкуется `iphlpapi.lib` (автоопределение широковещательного адреса через `GetAdaptersInfo`) — подключена в исходнике через `#pragma comment`.
-
-## 2. Сервер и клиент на одной машине
+## 2. Запуск: сервер и клиент на одном компьютере
 
 Окно 1:
 
 ```cmd
 cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming\lab6\build"
-ServerB.exe Hello 9101
+ServerNP.exe \\.\pipe\Tube
 ```
 
 Окно 2:
 
 ```cmd
 cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming\lab6\build"
-ClientB.exe Hello 9101
+ClientNP.exe \\.\pipe\Tube 3
 ```
 
-Ожидаемый вывод клиента:
+Ожидаемый вывод клиента (время обмена зависит от машины, порядок миллисекунд):
 
 ```
-ClientB: широковещательный поиск сервера "Hello" на порту 9101 (адрес 192.168.31.255)
-Получен отклик: "Hello"
-Сервер найден: 192.168.31.80:64600
+ClientNP: подключение к каналу \\.\pipe\Tube
+Соединение с сервером установлено
+Получено: Hello from ClientNP 001
+Получено: Hello from ClientNP 002
+Получено: Hello from ClientNP 003
+Время обмена 3 сообщениями: 0.003 с
 ```
 
-## 3. Явное задание широковещательного адреса
+## 3. Два сервера на разных каналах (аналог разных портов)
+
+Окно 1 и окно 2 — по серверу на каждое имя канала:
 
 ```cmd
-ClientB.exe Hello 9101 255.255.255.255
-ClientB.exe Hello 9101 127.255.255.255
-ClientB.exe Hello 9101 192.168.31.255
+ServerNP.exe \\.\pipe\Test1
 ```
-
-## 4. Проверка отказов
 
 ```cmd
-ClientB.exe Other 9101
-ClientB.exe Hello 9102
+ServerNP.exe \\.\pipe\Test2
 ```
 
-Ожидаемо: `Сервер с позывным "..." не найден`.
-
-## 5. Два сервера с одним позывным (задание 6)
-
-Окно 1:
+Окно 3 — клиент обращается к первому каналу, второй продолжает ждать:
 
 ```cmd
-ServerB.exe Hello 9101
+ClientNP.exe \\.\pipe\Test1 2
 ```
 
-Окно 2 (через пару секунд):
+## 4. Проверка обработки ошибок: клиент без сервера
 
 ```cmd
-ServerB.exe Hello 9101
+ClientNP.exe \\.\pipe\NoSuchPipe 1
 ```
 
-Второй сервер при старте печатает:
+Ожидаемо:
 
 ```
-ВНИМАНИЕ: в сети обнаружены серверы с позывным "Hello": 1 (запрос отправлен до привязки своего сокета)
+Ошибка: CreateFile: ERROR_FILE_NOT_FOUND: Канал с таким именем не создан
 ```
 
-## 6. Другой порт — другой сервер
+## 5. Транзакционные клиенты (задания 7 и 8)
+
+Сервер уже запущен (`\\.\pipe\Test1`):
 
 ```cmd
-ServerB.exe Hello 9102
-ClientB.exe Hello 9102
+ClientNPt.exe \\.\pipe\Test1 3
 ```
 
-Порт — единственный «адрес» сервера, который клиент знает заранее; позывной уточняет, тот ли это сервер.
+```cmd
+ClientNPct.exe \\.\pipe\Test1 2
+```
 
-## 7. Разбор ошибок
+`ClientNPt` держит одно соединение и делает 3 транзакции через `TransactNamedPipe`; `ClientNPct` делает 2 вызова `CallNamedPipe`, и в журнале сервера это два отдельных сеанса по одному сообщению.
+
+## 6. Сетевое имя канала
+
+```cmd
+hostname
+ClientNP.exe \\ИМЯ_КОМПЬЮТЕРА\pipe\Test1 2
+```
+
+| Параметр | Что означает |
+|---|---|
+| `\\.\pipe\Tube` | локальный формат: точка — текущий компьютер |
+| `\\ИМЯ_КОМПЬЮТЕРА\pipe\Tube` | сетевой формат: канал на другом компьютере через SMB |
+| `Tube` | короткое имя, программа сама подставит `\\.\pipe\` |
+| второй аргумент | количество сообщений (транзакций); без него число спрашивается с консоли |
+
+## 7. Замер на 1000 сообщениях
+
+```cmd
+ServerNP.exe \\.\pipe\Speed
+ClientNP.exe \\.\pipe\Speed 1000
+```
+
+Фактический результат на этой машине: клиент `0.083 с`, сервер `0.082 с`, все 1000 сообщений получены и возвращены.
+
+## 8. Разбор ошибок
 
 | Сообщение | Причина | Лечение |
 |---|---|---|
-| `Ошибка: sendto: WSAEACCES` | не выставлен `SO_BROADCAST` | опция уже стоит в коде; если убрать — ошибка вернётся |
-| `Сервер ... не найден` сразу после старта сервера | сервер ещё не привязал сокет (опрос сети в `CountServers`) | подождать ~1 с и повторить запрос |
-| `Ошибка: bind: WSAEADDRINUSE` | порт занят другим процессом | взять другой порт (`9102`, `9103`, …) |
-| сервер печатает `отклонён чужой запрос` | клиент отправил другой позывной | это ожидаемое поведение задания 1 |
-| `Ошибка: socket: WSANOTINITIALISED` | не вызван `WSAStartup` | в коде вызывается в `main` до создания сокетов |
+| `Ошибка: CreateFile: ERROR_FILE_NOT_FOUND` | сервер не запущен или другое имя канала | запустить `ServerNP.exe` с тем же именем |
+| `Ошибка: CreateFile: ERROR_PIPE_BUSY` после ожидания | экземпляр занят дольше 5000 мс | увеличить таймаут `WaitNamedPipe` или запускать клиентов по очереди |
+| `Ошибка: TransactNamedPipe: Ошибка Named Pipe, код 230` | дескриптор клиента не переведён в режим чтения сообщениями | вызывать `SetNamedPipeHandleState` с `PIPE_READMODE_MESSAGE` (в `ClientNPt` уже сделано) |
+| `cl` не найден | консоль без окружения MSVC | запустить `vcvars64.bat` или «x64 Native Tools Command Prompt for VS» |
+| русский текст в выводе — мусор | исходник прочитан как ANSI | собирать с `/utf-8` |
+| `LNK2019: unresolved external symbol ... WSAStartup` | не подключена библиотека Winsock | ключ `/link WS2_32.lib` или `#pragma comment(lib, "WS2_32.lib")` (в исходниках есть) |

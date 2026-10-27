@@ -101,7 +101,7 @@ Send-ConsoleCommand 'TestConsole' 'shutdown'
 ## 5. Поиск сервера широковещанием (ResponseServer)
 
 ```cmd
-cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming\lab6\build"
+cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming\lab4\build"
 ClientB.exe TestServer 9300
 ```
 

@@ -1,4 +1,4 @@
-# ЛР7 — команды сборки и запуска (символические имена)
+# ЛР7 — команды сборки и запуска (мейлслоты)
 
 Команды — из корня репозитория, в консоли с окружением MSVC.
 
@@ -7,83 +7,75 @@
 ```cmd
 cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming"
 if not exist lab7\build mkdir lab7\build
-cl /nologo /EHsc /utf-8 /W3 lab7\ServerB\ServerB.cpp /Fe:lab7\build\ServerB.exe
-cl /nologo /EHsc /utf-8 /W3 lab7\ClientS\ClientS.cpp /Fe:lab7\build\ClientS.exe
+cl /nologo /EHsc /utf-8 /W3 lab7\ServerMS\ServerMS.cpp /Fe:lab7\build\ServerMS.exe
+cl /nologo /EHsc /utf-8 /W3 lab7\ClientMS\ClientMS.cpp /Fe:lab7\build\ClientMS.exe
 ```
 
 | Ключ | Что делает |
 |---|---|
 | `/EHsc` | стандартная обработка исключений C++ для `throw string` в обработчиках ошибок |
-| `/utf-8` | исходник в UTF-8; без флага русский текст в строках ломается (MSVC читает как cp1251) |
+| `/utf-8` | исходник в UTF-8; без флага MSVC читает его как cp1251 и русский текст ломается |
 | `/W3` | уровень предупреждений (на этом коде предупреждений нет) |
 | `/Fe:` | имя выходного exe |
 
 ## 2. Сервер и клиент на одной машине
 
-Окно 1:
+Окно 1 (сервер запускается первым — мейлслот должен существовать до записи):
 
 ```cmd
 cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming\lab7\build"
-ServerB.exe Hello 9103
+ServerMS.exe
 ```
 
 Окно 2:
 
 ```cmd
-hostname
+cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming\lab7\build"
+ClientMS.exe \\.\mailslot\Box 10
 ```
+
+Ожидаемо в окне клиента:
+
+```
+ClientMS: Connecting to mailslot \\.\mailslot\Box...
+Connected to mailslot.
+Sent [1]: Hello from ClientMS 001
+...
+Exchange time for 10 messages: 0 seconds.
+```
+
+В окне сервера — по одному `Received: Hello from ClientMS 001..010`, затем `Received STOP signal` и время обмена.
+
+## 3. Второй клиент (один мейлслот — много писателей)
 
 ```cmd
-ClientS.exe ИМЯ_КОМПЬЮТЕРА Hello 9103
+ClientMS.exe \\.\mailslot\Box 3
 ```
 
-Ожидаемый вывод клиента:
+Сервер принимает сообщения второго клиента в тот же журнал: мейлслот не различает отправителей.
 
-```
-ClientS: поиск сервера "Hello" на компьютере "WIN11-DESKTOP-T", порт 9103
-Имя "WIN11-DESKTOP-T" разрешено в адрес 192.168.31.80
-Получен отклик: "Hello"
-Сервер найден: 192.168.31.80:55507
-```
-
-## 3. Без аргументов — по своему имени
+## 4. Проверка отказа: мейлслота нет
 
 ```cmd
-ClientS.exe
+ClientMS.exe \\.\mailslot\NoBox 1
 ```
 
-Клиент берёт имя своего компьютера через `gethostname`, позывной `Hello`, порт `2000`.
+Ожидаемо: `CreateFile: ERROR_FILE_NOT_FOUND: Мейлслот не найден`.
 
-## 4. Проверка отказов
+## 5. Широковещательное имя (ограничение платформы)
 
 ```cmd
-ClientS.exe localhost Hello 9103
-ClientS.exe no-such-host-xyz Hello 9103
-ClientS.exe ИМЯ_КОМПЬЮТЕРА Other 9103
+ClientMS.exe \\*\mailslot\Box 1
 ```
 
-Ожидаемо: первая команда находит сервер через `127.0.0.1`; вторая — `WSAHOST_NOT_FOUND: Хост не найден`; третья — имя разрешается, но отклик не совпадает с позывным.
-
-## 5. Что смотреть в журнале сервера
-
-```cmd
-ServerB.exe Hello 9103
-```
-
-```
-ServerB: символическое имя компьютера: Win11-Desktop-Tim
-Запрос от клиента 192.168.31.80:55506 (имя: host.docker.internal)
-Клиенту отправлен позывной "Hello"
-```
-
-`gethostname` даёт имя узла, `gethostbyaddr` — то, что вернула служба разрешения имён для адреса клиента (может отличаться от имени компьютера).
+На Windows 11 ожидаемо: `Ошибка Mailslot, код 3025`. Расшифровка: `net helpmsg 3025` → «Remote mailslots have been deprecated». Локальное имя `\\.\mailslot\Box` работает, сетевое — нет.
 
 ## 6. Разбор ошибок
 
 | Сообщение | Причина | Лечение |
 |---|---|---|
-| `WSAHOST_NOT_FOUND` | имя не разрешается (нет записи в DNS/`hosts`) | указать имя из `hostname` или `localhost` |
-| `WSATRY_AGAIN` | временный сбой службы имён | повторить запрос |
-| `Сервер ... не найден` при верном имени | сервер не запущен, другой порт или другой позывной | сверить порт и позывной с аргументами `ServerB` |
-| `Ошибка: sendto` | адрес не разрешён (нулевой) | проверить имя: при пустом `h_addr_list[0]` функция вернёт `false` до отправки |
-| `Ошибка: socket: WSANOTINITIALISED` | нет `WSAStartup` | в коде он вызывается первым |
+| `CreateFile: ERROR_FILE_NOT_FOUND` | сервер не запущен или другое имя мейлслота | запустить `ServerMS.exe` первым, сверить имя |
+| `Ошибка Mailslot, код 3025` | попытка удалённого/широковещательного мейлслота | использовать локальное имя `\\.\mailslot\Box` |
+| `CreateFile: ERROR_INVALID_NAME` (123) | неверный формат имени | формат: `\\.\mailslot\Имя` или `\\Сервер\mailslot\Имя` |
+| сервер не печатает сообщения | клиент отправил нулевую длину | `ReadFile` вернул 0 байт, цикл пропускает пустое сообщение |
+| `ERROR_ACCESS_DENIED` (5) | нет прав на мейлслот | проверить ACL, запустить с нужными правами |
