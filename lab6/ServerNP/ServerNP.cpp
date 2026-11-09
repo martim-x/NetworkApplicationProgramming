@@ -45,11 +45,33 @@ string SetErrorMsgText(string msgText, int code)
 	return msgText + GetErrorMsgText(code);
 }
 
+string BuildPipeName(const char* argument)
+{
+	string value = (argument == NULL) ? "" : argument;
+
+	if (value.empty())
+		return "\\\\.\\pipe\\Tube";
+
+	if (value.rfind("\\\\", 0) == 0)
+		return value;
+
+	return "\\\\.\\pipe\\" + value;
+}
+
 int main(int argc, char* argv[])
 {
 	SetConsoleOutputCP(CP_UTF8);
 
-	const char* pipeName = (argc > 1) ? argv[1] : "\\\\.\\pipe\\Tube";
+	string pipeNameText = BuildPipeName((argc > 1) ? argv[1] : NULL);
+
+	if (pipeNameText.rfind("\\\\.\\", 0) != 0)
+	{
+		cout << "Ошибка: сервер создаёт канал только на локальном компьютере, "
+			"нужно \\\\.\\pipe\\Имя, получено: " << pipeNameText << endl;
+		return 1;
+	}
+
+	const char* pipeName = pipeNameText.c_str();
 	char buffer[512];
 	HANDLE hPipe;
 	WSADATA wsaData;

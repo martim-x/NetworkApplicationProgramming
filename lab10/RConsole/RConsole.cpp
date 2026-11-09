@@ -10,12 +10,12 @@ int main(int argc, char* argv[])
 {
 	SetConsoleOutputCP(CP_UTF8);
 
-	const char* pipeName = (argc > 1) ? argv[1] : "\\\\.\\pipe\\ConcurrentServer";
+	string pipeName = NormalizePipeName((argc > 1) ? argv[1] : NULL);
 
 	cout << "RConsole: удалённая консоль сервера ConcurrentServer" << endl;
 	cout << "RConsole: канал управления " << pipeName << endl;
 
-	HANDLE pipe = ConnectConsole(pipeName);
+	HANDLE pipe = ConnectConsole(pipeName.c_str());
 	if (pipe == INVALID_HANDLE_VALUE)
 	{
 		cout << "RConsole: не удалось подключиться к каналу, код " << GetLastError() << endl;
@@ -49,7 +49,7 @@ int main(int argc, char* argv[])
 			}
 
 			string answer;
-			if (!SendConsoleCommand(pipeName, command, answer))
+			if (!SendConsoleCommand(pipeName.c_str(), command, answer))
 			{
 				cout << "RConsole: сервер не ответил на команду \"" << command << "\"" << endl;
 				break;
@@ -96,7 +96,7 @@ int main(int argc, char* argv[])
 		}
 
 		string answer;
-		if (!SendConsoleCommand(pipeName, command, answer))
+		if (!SendConsoleCommand(pipeName.c_str(), command, answer))
 		{
 			cout << "RConsole: сервер не ответил на команду \"" << command << "\"" << endl;
 			break;

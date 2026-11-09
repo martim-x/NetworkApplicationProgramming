@@ -731,6 +731,35 @@ static DWORD WINAPI ResponseServer(LPVOID)
 	return 0;
 }
 
+static void NormalizePipeName(char* name, size_t size)
+{
+	if (strncmp(name, "\\\\", 2) == 0)
+		return;
+
+	char shortName[260];
+	strcpy_s(shortName, name);
+	strcpy_s(name, size, "\\\\.\\pipe\\");
+	strcat_s(name, size, shortName);
+}
+
+static FARPROC FindExport(HMODULE library, const char* name)
+{
+	FARPROC address = GetProcAddress(library, name);
+
+	if (address != NULL)
+		return address;
+
+	char decorated[128];
+	sprintf_s(decorated, "_%s@4", name);
+	address = GetProcAddress(library, decorated);
+
+	if (address != NULL)
+		return address;
+
+	sprintf_s(decorated, "%s@4", name);
+	return GetProcAddress(library, decorated);
+}
+
 int main(int argc, char* argv[])
 {
 	SetConsoleOutputCP(CP_UTF8);
@@ -741,6 +770,15 @@ int main(int argc, char* argv[])
 	config.responsePort = (argc > 4) ? atoi(argv[4]) : 9200;
 	strcpy_s(config.callSign, (argc > 5) ? argv[5] : "ConcurrentServer");
 	serviceTimeoutMs = (argc > 6) ? atoi(argv[6]) : 60000;
+
+	NormalizePipeName(config.pipeName, sizeof(config.pipeName));
+
+	if (strncmp(config.pipeName, "\\\\.\\", 3) != 0)
+	{
+		Log("main: сервер создаёт канал только на локальном компьютере, получено: " +
+			string(config.pipeName));
+		return 1;
+	}
 
 	WSADATA wsaData;
 	HMODULE library = NULL;
@@ -777,12 +815,13 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
-	SSS = (FNSSS)GetProcAddress(library, "SSS");
-	FindService = (FNFindService)GetProcAddress(library, "FindService");
+	SSS = (FNSSS)FindExport(library, "SSS");
+	FindService = (FNFindService)FindExport(library, "FindService");
 
 	if (SSS == NULL || FindService == NULL)
 	{
-		Log("main: в библиотеке не найдены экспортируемые функции SSS/FindService");
+		Log("main: в библиотеке не найдены экспортируемые функции SSS/FindService "
+			"(проверьте разрядность DLL и EXE: x86-имена экспортируются как _SSS@4)");
 		FreeLibrary(library);
 		return 1;
 	}

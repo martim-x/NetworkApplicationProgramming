@@ -80,6 +80,8 @@ cl /nologo /EHsc /utf-8 /W3 lab9\ClientTime\ClientTime.cpp lab9\ClientApi\Client
 cl /nologo /EHsc /utf-8 /W3 lab9\ClientRand\ClientRand.cpp lab9\ClientApi\ClientApi.cpp /Fe:lab9\build\ClientRand.exe
 ```
 
+Каждый клиент содержит `#pragma comment(lib, "WS2_32.lib")`, поэтому проект, собранный из одного `ClientEcho.cpp`, линкуется без ручного добавления библиотеки в настройках компоновщика. Файл `ClientApi.cpp` всё равно должен входить в сборку: без него компоновщик не найдёт `FindServer`, `ConnectToServer`, `SendText`, `ReceiveText` и остальные функции API.
+
 ## 7. Вопросы для самопроверки
 
 1. **Зачем клиенту API, а не прямой код в каждой программе?** Протокол и обработка ошибок живут в одном месте; три программы отличаются только сценарием, а не реализацией обмена (задание 1).

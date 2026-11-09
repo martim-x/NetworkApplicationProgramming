@@ -4,11 +4,26 @@
 #include <cstring>
 using namespace std;
 
+string NormalizePipeName(const char* pipeName)
+{
+	string value = (pipeName == NULL) ? "" : pipeName;
+
+	if (value.empty())
+		return "\\\\.\\pipe\\ConcurrentServer";
+
+	if (value.rfind("\\\\", 0) == 0)
+		return value;
+
+	return "\\\\.\\pipe\\" + value;
+}
+
 HANDLE ConnectConsole(const char* pipeName)
 {
+	string fullName = NormalizePipeName(pipeName);
+
 	for (int attempt = 0; attempt < 50; attempt++)
 	{
-		HANDLE hPipe = CreateFileA(pipeName,
+		HANDLE hPipe = CreateFileA(fullName.c_str(),
 			GENERIC_READ | GENERIC_WRITE,
 			FILE_SHARE_READ | FILE_SHARE_WRITE,
 			NULL,
@@ -31,7 +46,7 @@ HANDLE ConnectConsole(const char* pipeName)
 		if (GetLastError() != ERROR_PIPE_BUSY)
 			return INVALID_HANDLE_VALUE;
 
-		if (!WaitNamedPipeA(pipeName, 500))
+		if (!WaitNamedPipeA(fullName.c_str(), 500))
 			Sleep(100);
 	}
 

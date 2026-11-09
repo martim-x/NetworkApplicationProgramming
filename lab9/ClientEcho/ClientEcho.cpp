@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#pragma comment(lib, "WS2_32.lib")
 using namespace std;
 
 int main(int argc, char* argv[])

@@ -1,9 +1,11 @@
 #pragma once
 
-#include <windows.h>
 #include <string>
+#include <windows.h>
 
 const int CONSOLE_ANSWER_SIZE = 128;
+
+std::string NormalizePipeName(const char* pipeName);
 
 HANDLE ConnectConsole(const char* pipeName);
 
