@@ -228,21 +228,25 @@ function Start-TestServer([int]$ServiceTimeout = 15000) {
             (Split-Path -Parent $ServerExe)
         $ctx.Process = $p
 
+        # Readiness probe через UDP-дискавери (позывной): TCP-connect здесь
+        # засчитывался бы сервером как подключение/отказ и искажал статистику.
         $sw = [Diagnostics.Stopwatch]::StartNew()
         while ($sw.ElapsedMilliseconds -lt 10000) {
             if ($p.HasExited) {
                 $lastError = "server exited early with code $($p.ExitCode); log: " + ((Get-LogLines $p) -join ' | ')
                 break
             }
-            $c = New-Object Net.Sockets.TcpClient
+            $u = New-Object Net.Sockets.UdpClient
+            $u.Client.ReceiveTimeout = 500
             try {
-                $iar = $c.BeginConnect('127.0.0.1', $ctx.TcpPort, $null, $null)
-                if ($iar.AsyncWaitHandle.WaitOne(500) -and $c.Connected) {
-                    $c.Close()
-                    return $ctx
-                }
+                $b = [Text.Encoding]::UTF8.GetBytes($ctx.CallSign + [char]0)
+                $u.Send($b, $b.Length, '127.0.0.1', $ctx.UdpPort) | Out-Null
+                $ep = New-Object Net.IPEndPoint ([Net.IPAddress]::Any), 0
+                $r = $u.Receive([ref]$ep)
+                $reply = ([Text.Encoding]::UTF8.GetString($r)).TrimEnd([char]0)
+                if ($reply -eq $ctx.CallSign) { return $ctx }
             } catch { }
-            finally { $c.Close() }
+            finally { $u.Close() }
             Start-Sleep -Milliseconds 100
         }
 

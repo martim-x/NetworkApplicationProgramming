@@ -138,8 +138,9 @@ bool FindServer(const char* callSign, short udpPort, short tcpPort, ServerAddres
 	return found;
 }
 
-// Поиск сервера по имени хоста: getaddrinfo + неблокирующие connect-попытки
-// с общим бюджетом timeoutMs. Все сокеты и результаты адресов освобождаются.
+// Поиск сервера по имени хоста: getaddrinfo, без пробного TCP-соединения
+// (каждое такое соединение сервер засчитывал бы в статистику как отказ).
+// Все результаты адресов освобождаются.
 bool FindServerByName(const char* hostname, short tcpPort, ServerAddress& server, int timeoutMs)
 {
 	// Preserve the unsigned bit pattern for valid ports 32768..65535.
@@ -170,89 +171,29 @@ bool FindServerByName(const char* hostname, short tcpPort, ServerAddress& server
 
 	DWORD deadline = GetTickCount() + (DWORD)timeoutMs;
 	bool found = false;
-	int lastConnectError = WSAETIMEDOUT;
+	(void)deadline;
 
+	// Пробное TCP-соединение не открываем: каждое соединение сервер засчитал бы
+	// как подключение/отказ и искажал бы статистику. Имя и адрес полностью
+	// разрешены DNS; доступность порта проверит ConnectToServer при первом
+	// подключении. Берём первый IPv4-адрес результата.
 	for (addrinfo* ai = results; ai != NULL && !found; ai = ai->ai_next)
 	{
 		if (ai->ai_family != AF_INET)
 			continue;
 
-		if (GetTickCount() >= deadline)
-			break;
-
-		SOCKET s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-
-		if (s == INVALID_SOCKET)
-			continue;
-
-		u_long nonBlocking = 1;
-		ioctlsocket(s, FIONBIO, &nonBlocking);
-
-		bool connected = (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0);
-
-		if (!connected)
-		{
-			int connectError = WSAGetLastError();
-
-			if (connectError == WSAEWOULDBLOCK || connectError == WSAEINPROGRESS)
-			{
-				DWORD remaining = deadline - GetTickCount();
-
-				if (remaining > 0 && remaining < INFINITE - 1)
-				{
-					fd_set writeSet;
-					FD_ZERO(&writeSet);
-					FD_SET(s, &writeSet);
-
-					timeval wait;
-					wait.tv_sec = (long)(remaining / 1000);
-					wait.tv_usec = (long)((remaining % 1000) * 1000);
-
-					if (select(0, NULL, &writeSet, NULL, &wait) > 0)
-					{
-						int soError = 0;
-						int optLen = sizeof(soError);
-
-						if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&soError, &optLen) == 0)
-							connectError = soError;
-					}
-					else
-					{
-						connectError = WSAGetLastError();
-					}
-				}
-			}
-
-			if (connectError == 0)
-				connected = true;
-			else
-				lastConnectError = connectError;
-		}
-
-		if (connected)
-		{
-			// Пробное соединение не требуется: TCP-адрес уже разрешён DNS.
-			// Не открываем и сразу не закрываем сессию: сервер мог бы засчитать
-			// это как активное подключение до первого запроса клиента.
-			closesocket(s);
-
-			SOCKADDR_IN* sin = (SOCKADDR_IN*)ai->ai_addr;
-			server.address = *sin;
-			server.address.sin_port = htons((u_short)portValue);
-			server.ip = inet_ntoa(sin->sin_addr);
-			server.port = tcpPort;
-			found = true;
-		}
-		else
-		{
-			closesocket(s);
-		}
+		SOCKADDR_IN* sin = (SOCKADDR_IN*)ai->ai_addr;
+		server.address = *sin;
+		server.address.sin_port = htons((u_short)portValue);
+		server.ip = inet_ntoa(sin->sin_addr);
+		server.port = tcpPort;
+		found = true;
 	}
 
 	freeaddrinfo(results);
 
 	if (!found)
-		WSASetLastError(lastConnectError);
+		WSASetLastError(WSANO_DATA);
 
 	return found;
 }
@@ -269,7 +210,13 @@ SOCKET ConnectToServer(const ServerAddress& server)
 	SOCKADDR_IN target = server.address;
 	target.sin_port = htons(server.port);
 
-	if (connect(s, (sockaddr*)&target, sizeof(target)) == SOCKET_ERROR)
+	// Неблокирующее подключение с ограничением по времени: connect к
+	// недоступному хосту иначе висит до ~21 с.
+	u_long nonBlocking = 1;
+	ioctlsocket(s, FIONBIO, &nonBlocking);
+
+	if (connect(s, (sockaddr*)&target, sizeof(target)) == SOCKET_ERROR &&
+		WSAGetLastError() != WSAEWOULDBLOCK)
 	{
 		int err = WSAGetLastError();
 		closesocket(s);
@@ -277,7 +224,36 @@ SOCKET ConnectToServer(const ServerAddress& server)
 		return INVALID_SOCKET;
 	}
 
-DWORD timeout = 5000;
+	fd_set writeSet;
+	FD_ZERO(&writeSet);
+	FD_SET(s, &writeSet);
+
+	timeval wait;
+	wait.tv_sec = 3;
+	wait.tv_usec = 0;
+
+	if (select(0, NULL, &writeSet, NULL, &wait) <= 0)
+	{
+		closesocket(s);
+		WSASetLastError(WSAETIMEDOUT);
+		return INVALID_SOCKET;
+	}
+
+	int soError = 0;
+	int optLen = sizeof(soError);
+
+	if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&soError, &optLen) != 0 || soError != 0)
+	{
+		int err = (soError != 0) ? soError : WSAGetLastError();
+		closesocket(s);
+		WSASetLastError(err);
+		return INVALID_SOCKET;
+	}
+
+	u_long blocking = 0;
+	ioctlsocket(s, FIONBIO, &blocking);
+
+	DWORD timeout = 5000;
 	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
 	// SOCKET-значения могут переиспользоваться: сбросить возможно устаревший буфер приёма
@@ -353,6 +329,11 @@ int ReceiveText(SOCKET s, char* buffer, int size)
 			memcpy(buffer, inbox.data(), nul);
 			buffer[nul] = '\0';
 			inbox.erase(0, nul + 1);
+
+			// пустой хвост записи не держать: SOCKET-значения переиспользуются
+			if (inbox.empty())
+				ForgetSocketState(s);
+
 			return (int)nul;
 		}
 

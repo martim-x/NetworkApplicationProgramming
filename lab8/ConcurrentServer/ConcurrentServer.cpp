@@ -163,21 +163,24 @@ static bool WaitForCommandTaken()
 
 static bool HasPendingContacts()
 {
-    bool pending = false;
+	bool pending = false;
 
-    EnterCriticalSection(&contactLock);
+	EnterCriticalSection(&contactLock);
 
-    for (int i = 0; i < MAX_CONTACTS; i++)
-    {
-        if (contacts[i].socket != INVALID_SOCKET)
-        {
-            pending = true;
-            break;
-        }
-    }
+	for (int i = 0; i < MAX_CONTACTS; i++)
+	{
+		// слот не освобождён, пока жив обслуживающий поток: классификация
+		// (completed/refused) выполняется в ReleaseSession, поэтому после
+		// exit циклы завершаются только после освобождения всех слотов
+		if (contacts[i].socket != INVALID_SOCKET || contacts[i].serviceThread != NULL)
+		{
+			pending = true;
+			break;
+		}
+	}
 
-    LeaveCriticalSection(&contactLock);
-    return pending;
+	LeaveCriticalSection(&contactLock);
+	return pending;
 }
 
 // Аварийное закрытие сокета сеанса: shutdown() не прерывает блокирующий recv
@@ -759,11 +762,14 @@ static DWORD WINAPI ConsolePipe(LPVOID)
 	char buffer[COMMAND_SIZE];
 	DWORD bytesRead, bytesWritten;
 
+	// Очередь событий очищается только после успешной записи ответа: потеря
+	// доставки не должна терять диагностику. Буфер канала рассчитан на
+	// несколько событий сразу.
 	if ((hPipe = CreateNamedPipeA(config.pipeName,
-		PIPE_ACCESS_DUPLEX,
+		PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
 		PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
 		1,
-		512,
+		4096,
 		512,
 		0,
 		NULL)) == INVALID_HANDLE_VALUE)
@@ -774,32 +780,98 @@ static DWORD WINAPI ConsolePipe(LPVOID)
 
 	Log("ConsolePipe: канал управления создан: " + string(config.pipeName));
 
+	OVERLAPPED connectOverlapped;
+	memset(&connectOverlapped, 0, sizeof(connectOverlapped));
+	HANDLE pipeEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+
 	while (!serverExit)
 	{
-		if (!ConnectNamedPipe(hPipe, NULL))
+		if (pipeEvent == NULL)
+			break;
+
+		// overlapped-подключение с возможностью отмены при завершении сервера:
+		// блокирующий ConnectNamedPipe не позволил бы потоку закончиться
+		memset(&connectOverlapped, 0, sizeof(connectOverlapped));
+		connectOverlapped.hEvent = pipeEvent;
+
+		BOOL connected = ConnectNamedPipe(hPipe, &connectOverlapped);
+		int connectErr = connected ? 0 : GetLastError();
+
+		if (!connected && connectErr == ERROR_IO_PENDING)
 		{
-			int err = GetLastError();
-			if (err != ERROR_PIPE_CONNECTED)
+			// ждать подключения, оставаясь отзывчивым к команде завершения
+			while (!serverExit)
 			{
-				Log("ConsolePipe: ConnectNamedPipe: " + GetErrorMsgText(err));
+				if (WaitForSingleObject(pipeEvent, 200) == WAIT_OBJECT_0)
+					break;
+			}
+
+			if (serverExit)
+			{
+				CancelIoEx(hPipe, &connectOverlapped);
+				DWORD settle = 0;
+				GetOverlappedResult(hPipe, &connectOverlapped, &settle, TRUE);
+				break;
+			}
+
+			// уточнить фактический результат подключения
+			DWORD settle = 0;
+			BOOL got = GetOverlappedResult(hPipe, &connectOverlapped, &settle, FALSE);
+			connectErr = got ? 0 : GetLastError();
+
+			if (!got && connectErr == ERROR_PIPE_CONNECTED)
+				got = TRUE;
+
+			if (!got)
+			{
+				Log("ConsolePipe: ConnectNamedPipe: " + GetErrorMsgText(connectErr));
 				Sleep(100);
 				continue;
 			}
 		}
-
-		memset(buffer, 0, sizeof(buffer));
-
-		if (!ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL))
+		else if (!connected && connectErr != ERROR_PIPE_CONNECTED)
 		{
-			int err = GetLastError();
-			if (err != ERROR_BROKEN_PIPE && err != ERROR_NO_DATA)
-				Log("ConsolePipe: ReadFile: " + GetErrorMsgText(err));
-
-			DisconnectNamedPipe(hPipe);
+			Log("ConsolePipe: ConnectNamedPipe: " + GetErrorMsgText(connectErr));
+			Sleep(100);
 			continue;
 		}
 
-		if (bytesRead == 0)
+		// чтение команды: тоже overlapped, с отменой при завершении сервера
+		memset(buffer, 0, sizeof(buffer));
+		OVERLAPPED readOverlapped;
+		memset(&readOverlapped, 0, sizeof(readOverlapped));
+		readOverlapped.hEvent = pipeEvent;
+		bytesRead = 0;
+
+		BOOL readOk = ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, &readOverlapped);
+		int readErr = readOk ? 0 : GetLastError();
+
+		if (!readOk && readErr == ERROR_IO_PENDING)
+		{
+			while (!serverExit)
+			{
+				if (WaitForSingleObject(pipeEvent, 200) == WAIT_OBJECT_0)
+					break;
+			}
+
+			if (serverExit)
+			{
+				CancelIoEx(hPipe, &readOverlapped);
+				DWORD settle = 0;
+				GetOverlappedResult(hPipe, &readOverlapped, &settle, TRUE);
+				break;
+			}
+
+			DWORD settle = 0;
+			readOk = GetOverlappedResult(hPipe, &readOverlapped, &settle, FALSE);
+			bytesRead = settle;
+			readErr = readOk ? 0 : GetLastError();
+		}
+
+		if (!readOk && readErr != ERROR_BROKEN_PIPE && readErr != ERROR_NO_DATA)
+			Log("ConsolePipe: ReadFile: " + GetErrorMsgText(readErr));
+
+		if (!readOk || bytesRead == 0)
 		{
 			DisconnectNamedPipe(hPipe);
 			continue;
@@ -841,7 +913,6 @@ static DWORD WINAPI ConsolePipe(LPVOID)
 					answer += eventQueue[i];
 				}
 
-				eventQueue.clear();
 				LeaveCriticalSection(&eventsLock);
 
 				Log("ConsolePipe: в канал отправлено событий: " +
@@ -851,7 +922,16 @@ static DWORD WINAPI ConsolePipe(LPVOID)
 			if (answer.empty())
 				answer = "-";
 
-			WriteFile(hPipe, answer.c_str(), (DWORD)answer.size() + 1, &bytesWritten, NULL);
+			BOOL delivered = WriteFile(hPipe, answer.c_str(), (DWORD)answer.size() + 1, &bytesWritten, NULL);
+
+			// очередь очищается только после успешной доставки ответа
+			if (cmd == "events" && delivered)
+			{
+				EnterCriticalSection(&eventsLock);
+				eventQueue.clear();
+				LeaveCriticalSection(&eventsLock);
+			}
+
 			FlushFileBuffers(hPipe);
 		}
 		else
@@ -872,6 +952,10 @@ static DWORD WINAPI ConsolePipe(LPVOID)
 	}
 
 	CloseHandle(hPipe);
+
+	if (pipeEvent != NULL)
+		CloseHandle(pipeEvent);
+
 	Log("ConsolePipe: завершён");
 	return 0;
 }

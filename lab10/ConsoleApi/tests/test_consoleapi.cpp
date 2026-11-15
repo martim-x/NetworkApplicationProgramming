@@ -82,7 +82,13 @@ static void FixturePipeWorker(const string& fullName, FixtureBehavior behavior)
             WriteFile(pipe, "nocmd", 6, &bytesWritten, NULL);
         else if (behavior == FIX_DISCONNECT)
             FlushFileBuffers(pipe); // ответ не пишем: клиент увидит разрыв канала
-        // FIX_SILENT: ответа нет — клиент должен уйти по таймауту
+        else if (behavior == FIX_SILENT)
+        {
+            // Молчание = канал остаётся открытым и без ответа до истечения
+            // дедлайна клиента. Немедленный DisconnectNamedPipe дал бы клиенту
+            // ERROR_BROKEN_PIPE вместо таймаута чтения.
+            Sleep(4000);
+        }
     }
 
     DisconnectNamedPipe(pipe);

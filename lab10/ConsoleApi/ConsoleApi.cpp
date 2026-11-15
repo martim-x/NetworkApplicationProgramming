@@ -104,16 +104,23 @@ HANDLE ConnectConsole(const char* pipeName)
 }
 
 // Ожидание завершения overlapped-операции с ограничением по дедлайну.
-// Возвращает true при успехе; при таймауте отменяет операцию (CancelIoEx).
+// Возвращает true при завершении (успешном или ERROR_MORE_DATA); bytesOut
+// получает число реально переданных байтов. При таймауте отменяет операцию
+// (CancelIoEx) и дожидается её фактического завершения, чтобы ядро не
+// дописывало статус в уже разрушенную структуру OVERLAPPED.
 static bool WaitForOverlapped(HANDLE pipe, OVERLAPPED& overlapped, ULONGLONG deadline,
-DWORD& lastError, bool cancelOnTimeout)
+DWORD& lastError, bool cancelOnTimeout, DWORD& bytesOut)
 {
-lastError = 0;
-DWORD transferred = 0;
+	lastError = 0;
+	bytesOut = 0;
+	DWORD transferred = 0;
 
-BOOL completed = GetOverlappedResult(pipe, &overlapped, &transferred, FALSE);
-if (completed)
-	return true;
+	BOOL completed = GetOverlappedResult(pipe, &overlapped, &transferred, FALSE);
+	if (completed || GetLastError() == ERROR_MORE_DATA)
+	{
+		bytesOut = transferred;
+		return true;
+	}
 
 	lastError = GetLastError();
 	if (lastError != ERROR_IO_INCOMPLETE)
@@ -127,11 +134,18 @@ if (completed)
 		BOOL ok = GetOverlappedResult(pipe, &overlapped, &bytesTransferred, FALSE);
 		if (!ok)
 			lastError = GetLastError();
+		bytesOut = bytesTransferred;
 		return ok != FALSE;
 	}
 
 	if (cancelOnTimeout)
+	{
 		CancelIoEx(pipe, &overlapped);
+		// отменённая операция всё равно завершится: собрать её статус,
+		// прежде чем структура OVERLAPPED выйдет из области видимости
+		DWORD cancelled = 0;
+		GetOverlappedResult(pipe, &overlapped, &cancelled, TRUE);
+	}
 
 	lastError = ERROR_TIMEOUT;
 	return false;
@@ -185,65 +199,86 @@ bool ExecuteConsoleCommand(const char* pipeName, const string& command,
 	}
 	else
 	{
-		if (WaitForOverlapped(pipe, writeOverlapped, deadline, writeError, false))
+		DWORD writeTransferred = 0;
+
+		if (WaitForOverlapped(pipe, writeOverlapped, deadline, writeError, false, writeTransferred))
 		{
-			// чтение ответа; при отсутствии ответа — таймаут, отмена чтения
-			OVERLAPPED readOverlapped;
-			memset(&readOverlapped, 0, sizeof(readOverlapped));
-			readOverlapped.hEvent = event;
+			// чтение ответа; при отсутствии ответа — таймаут, отмена чтения.
+			// Message-mode ReadFile возвращает ERROR_MORE_DATA, когда сообщение
+			// больше буфера: часть уже передана (bytesRead валидны), дочитываем
+			// хвост тем же дедлайном.
+			result.payload.clear();
+			DWORD readError = 0;
+			DWORD readTransferred = 0;
+			bool readDone = false;
 
-			char buffer[CONSOLE_ANSWER_SIZE];
-			memset(buffer, 0, sizeof(buffer));
-			DWORD bytesRead = 0;
-
-			BOOL read = ReadFile(pipe, buffer, sizeof(buffer) - 1, &bytesRead, &readOverlapped);
-
-			if (!read && GetLastError() != ERROR_IO_PENDING)
+			while (true)
 			{
-				result.status = CONSOLE_READ_FAILED;
+				OVERLAPPED readOverlapped;
+				memset(&readOverlapped, 0, sizeof(readOverlapped));
+				readOverlapped.hEvent = event;
+
+				char buffer[CONSOLE_ANSWER_SIZE];
+				DWORD bytesRead = 0;
+
+				BOOL read = ReadFile(pipe, buffer, sizeof(buffer), &bytesRead, &readOverlapped);
+				DWORD immediateError = read ? 0 : GetLastError();
+
+				if (!read && immediateError != ERROR_IO_PENDING &&
+					immediateError != ERROR_MORE_DATA)
+				{
+					readError = immediateError;
+					break;
+				}
+
+				if (immediateError == ERROR_MORE_DATA)
+				{
+					// синхронное частичное завершение: bytesRead уже валидны
+					result.payload.append(buffer, bytesRead);
+					continue;
+				}
+
+				readDone = WaitForOverlapped(pipe, readOverlapped, deadline, readError, true, readTransferred);
+
+				if (!readDone)
+					break; // таймаут или ошибка — readError уже установлен
+
+				if (readTransferred > 0)
+					result.payload.append(buffer, readTransferred);
+
+				if (readError == ERROR_MORE_DATA)
+				{
+					readError = 0;
+					continue; // дочитываем хвост сообщения
+				}
+
+				break;
+			}
+
+			if (!result.payload.empty())
+			{
+				while (!result.payload.empty() && result.payload.back() == '\0')
+					result.payload.pop_back();
+			}
+
+			if (!result.payload.empty())
+			{
+				result.status = CONSOLE_OK;
+				success = true;
+			}
+			else if (readError == ERROR_TIMEOUT)
+			{
+				result.status = CONSOLE_TIMEOUT;
 				result.operation = "ReadFile";
-				result.lastError = GetLastError();
-				result.errorText = FormatErrorText(result.lastError);
+				result.lastError = ERROR_TIMEOUT;
+				result.errorText = FormatErrorText(ERROR_TIMEOUT);
 			}
 			else
 			{
-				DWORD readError = 0;
-				DWORD transferred = 0;
-
-				if (WaitForOverlapped(pipe, readOverlapped, deadline, readError, true) &&
-					GetOverlappedResult(pipe, &readOverlapped, &transferred, FALSE))
-				{
-					if (transferred > 0)
-					{
-						result.payload.assign(buffer, transferred);
-						while (!result.payload.empty() && result.payload.back() == '\0')
-							result.payload.pop_back();
-
-						result.status = CONSOLE_OK;
-						success = true;
-					}
-					else
-					{
-						result.status = CONSOLE_READ_FAILED;
-						result.operation = "ReadFile";
-						result.lastError = ERROR_NO_DATA;
-						result.errorText = FormatErrorText(ERROR_NO_DATA);
-					}
-				}
-				else if (readError == ERROR_TIMEOUT)
-				{
-					result.status = CONSOLE_TIMEOUT;
-					result.operation = "ReadFile";
-					result.lastError = ERROR_TIMEOUT;
-					result.errorText = FormatErrorText(ERROR_TIMEOUT);
-				}
-				else
-				{
-					result.status = CONSOLE_READ_FAILED;
-					result.operation = "ReadFile";
-					result.lastError = readError;
-					result.errorText = FormatErrorText(readError);
-				}
+				result.status = CONSOLE_READ_FAILED;
+				result.operation = "ReadFile";
+				result.lastError = (readError != 0) ? readError : ERROR_NO_DATA;
+				result.errorText = FormatErrorText(result.lastError);
 			}
 		}
 		else if (writeError == ERROR_TIMEOUT)
