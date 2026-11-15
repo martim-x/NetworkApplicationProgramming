@@ -16,11 +16,15 @@ struct ListContact
 	HANDLE watchdog;
 	volatile LONG busy;
 	volatile LONG finished;
+	volatile LONG failed;          // сеанс завершён отказом (таймаут, неверный запрос, ошибка обмена)
+	unsigned generation;           // поколение слота: защита APC/таймера от переиспользования слота
 	DWORD startedAt;
 	int messageCount;
-	char request[32];
-	char pending[MESSAGE_SIZE];
+	char request[32];              // код запроса (NUL-терминированный элемент протокола)
+	char pending[MESSAGE_SIZE];    // payload, следующий за терминатором запроса
 	int pendingBytes;
+	char incoming[MESSAGE_SIZE];   // накопитель первого запроса до терминатора
+	int incomingBytes;
 };
 
 struct StatsInfo

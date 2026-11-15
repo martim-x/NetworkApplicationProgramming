@@ -3,6 +3,8 @@
 #include "../ServiceLibrary/ServiceLibrary.h"
 #include <iostream>
 #include <string>
+#include <vector>
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -30,10 +32,29 @@ static HANDLE acceptThreadHandle = NULL;
 static char command[COMMAND_SIZE] = "start";
 static volatile LONG accepting = 1;
 static volatile LONG serverExit = 0;
+static volatile LONG drainMode = 0;      // 0 — нет, 1 — wait, 2 — shutdown
 static int serviceTimeoutMs = 60000;
 static int lastPriorityLevel = -1;
+static unsigned nextGeneration = 0;      // защищается contactLock
 static FNSSS SSS = NULL;
 static FNFindService FindService = NULL;
+
+// Диагностика для удалённой консоли: ограниченная очередь событий сеансов,
+// забирается служебной командой events (протокол ConsolePipe/RConsole).
+static CRITICAL_SECTION eventsLock;
+static vector<string> eventQueue;
+static const size_t EVENT_QUEUE_LIMIT = 256;
+
+static void AddEvent(const string& text)
+{
+	EnterCriticalSection(&eventsLock);
+
+	if (eventQueue.size() >= EVENT_QUEUE_LIMIT)
+		eventQueue.erase(eventQueue.begin());
+
+	eventQueue.push_back(text);
+	LeaveCriticalSection(&eventsLock);
+}
 
 static string GetErrorMsgText(int code)
 {
@@ -76,6 +97,17 @@ static string EndpointToString(const SOCKADDR_IN& address)
 	return string(inet_ntoa(address.sin_addr)) + ":" + to_string(ntohs(address.sin_port));
 }
 
+static void CopyEndpoint(char* dst, size_t size, const SOCKADDR_IN& address)
+{
+	string text = EndpointToString(address);
+
+	if (text.size() >= size)
+		text.resize(size - 1);
+
+	memcpy(dst, text.c_str(), text.size());
+	dst[text.size()] = '\0';
+}
+
 static void PrintStats()
 {
 	Log("--- Статистика сервера ---");
@@ -83,6 +115,15 @@ static void PrintStats()
 	Log("  активных сейчас:    " + to_string(stats.activeConnections));
 	Log("  обслужено успешно:  " + to_string(stats.completedConnections));
 	Log("  отказов:            " + to_string(stats.refusedConnections));
+}
+
+// Одна строка счётчиков для удалённой консоли (команда statistics по каналу)
+static string StatsLine()
+{
+	return "total=" + to_string(stats.totalConnections) +
+		" active=" + to_string(stats.activeConnections) +
+		" completed=" + to_string(stats.completedConnections) +
+		" refused=" + to_string(stats.refusedConnections);
 }
 
 static bool TakeCommand(string& result)
@@ -120,6 +161,59 @@ static bool WaitForCommandTaken()
 	return false;
 }
 
+static bool HasPendingContacts()
+{
+	bool pending = false;
+
+	EnterCriticalSection(&contactLock);
+
+	for (int i = 0; i < MAX_CONTACTS; i++)
+	{
+		// слот не освобождён, пока жив обслуживающий поток: классификация
+		// (completed/refused) выполняется в ReleaseSession, поэтому после
+		// exit циклы завершаются только после освобождения всех слотов
+		if (contacts[i].socket != INVALID_SOCKET || contacts[i].serviceThread != NULL)
+		{
+			pending = true;
+			break;
+		}
+	}
+
+	LeaveCriticalSection(&contactLock);
+	return pending;
+}
+
+// Аварийное закрытие сокета сеанса: shutdown() не прерывает блокирующий recv
+// обслуживающего потока, поэтому используется SO_LINGER=0 + closesocket (RST).
+// Pending recv возвращается с ошибкой, поток завершается штатно.
+static void AbortSessionSocket(ListContact& contact)
+{
+    if (contact.socket == INVALID_SOCKET)
+        return;
+
+    LINGER linger;
+    linger.l_onoff = 1;
+    linger.l_linger = 0;
+    setsockopt(contact.socket, SOL_SOCKET, SO_LINGER,
+        (const char*)&linger, sizeof(linger));
+
+    closesocket(contact.socket);
+    contact.socket = INVALID_SOCKET;
+}
+
+static void InterruptActiveSessions()
+{
+	EnterCriticalSection(&contactLock);
+
+	for (int i = 0; i < MAX_CONTACTS; i++)
+	{
+		if (contacts[i].socket != INVALID_SOCKET)
+			AbortSessionSocket(contacts[i]);
+	}
+
+	LeaveCriticalSection(&contactLock);
+}
+
 static void ProcessCommand()
 {
 	string cmd;
@@ -129,6 +223,7 @@ static void ProcessCommand()
 	if (cmd == "start")
 	{
 		InterlockedExchange(&accepting, 1);
+		InterlockedExchange(&drainMode, 0);
 		Log("AcceptServer: команда start — приём клиентов разрешён");
 	}
 	else if (cmd == "stop")
@@ -143,26 +238,19 @@ static void ProcessCommand()
 	else if (cmd == "wait")
 	{
 		InterlockedExchange(&accepting, 0);
+		InterlockedExchange(&drainMode, 1);
 		Log("AcceptServer: команда wait — ожидание завершения обслуживания клиентов");
-
-		while (stats.activeConnections > 0 && !serverExit)
-			Sleep(50);
-
-		Log("AcceptServer: все подключённые клиенты обслужены");
 	}
 	else if (cmd == "shutdown")
 	{
 		InterlockedExchange(&accepting, 0);
+		InterlockedExchange(&drainMode, 2);
 		Log("AcceptServer: команда shutdown — приём запрещён, ждём обслуживания");
-
-		while (stats.activeConnections > 0 && !serverExit)
-			Sleep(50);
-
-		InterlockedExchange(&serverExit, 1);
-		Log("AcceptServer: сервер завершает работу (shutdown)");
 	}
 	else if (cmd == "exit")
 	{
+		InterlockedExchange(&accepting, 0);
+		InterruptActiveSessions();
 		InterlockedExchange(&serverExit, 1);
 		Log("AcceptServer: сервер завершает работу (exit)");
 	}
@@ -172,38 +260,76 @@ static void ProcessCommand()
 	}
 }
 
-static VOID CALLBACK StartServiceAPC(ULONG_PTR param)
+// Снимок данных сеанса для APC-уведомлений: отложенный APC не читает поля слота,
+// поэтому повторное использование слота не искажает отчёт о чужом сеансе.
+struct ServiceNotice
 {
-	int index = (int)param;
+	char endpoint[64];
+	int messageCount;
+	double seconds;
+	bool started;
+};
+
+static VOID CALLBACK ServiceNoticeAPC(ULONG_PTR param)
+{
+	ServiceNotice* notice = (ServiceNotice*)param;
+
+	if (notice == NULL)
+		return;
+
+	if (notice->started)
+	{
+		Log(string("APC AcceptServer: старт обслуживания клиента ") + notice->endpoint);
+	}
+	else
+	{
+		char buffer[128];
+		sprintf_s(buffer, sizeof(buffer), "%.3f", notice->seconds);
+		Log(string("APC AcceptServer: завершение обслуживания клиента ") + notice->endpoint +
+			", сообщений " + to_string(notice->messageCount) + ", время " + buffer + " с");
+	}
+
+	delete notice;
+}
+
+static ULONG_PTR MakeSessionToken(int index, unsigned generation)
+{
+	return ((ULONG_PTR)generation << 16) | (ULONG_PTR)(index & 0xFFFF);
+}
+
+// APC ожидающего таймера сеанса: выполняется в alertable-цикле AcceptServer.
+// Владение слотом проверяется по поколению под contactLock, поэтому отложенный
+// срабатывающий таймер не может завершить чужой сеанс.
+static VOID CALLBACK SessionTimerAPC(LPVOID param, DWORD, DWORD)
+{
+	ULONG_PTR token = (ULONG_PTR)param;
+	int index = (int)(token & 0xFFFF);
+	unsigned generation = (unsigned)(token >> 16);
+
+	if (index < 0 || index >= MAX_CONTACTS)
+		return;
 
 	EnterCriticalSection(&contactLock);
 	ListContact& contact = contacts[index];
 
-	if (contact.socket == INVALID_SOCKET)
+	if (contact.generation != generation || contact.socket == INVALID_SOCKET || contact.finished)
 	{
 		LeaveCriticalSection(&contactLock);
 		return;
 	}
 
-	Log("APC AcceptServer: старт обслуживания клиента " + EndpointToString(contact.address));
+	InterlockedExchange(&contact.failed, 1);
+	InterlockedExchange(&contact.finished, 1);
+	AbortSessionSocket(contact);
+
+	Log("Watchdog: клиент " + EndpointToString(contact.address) +
+		" превысил лимит " + to_string(serviceTimeoutMs) +
+		" мс — сокет закрыт, обслуживающий поток завершится штатно");
+
+	AddEvent("таймаут: клиент " + EndpointToString(contact.address) +
+		" превысил лимит " + to_string(serviceTimeoutMs) + " мс");
+
 	LeaveCriticalSection(&contactLock);
-}
-
-static VOID CALLBACK FinishServiceAPC(ULONG_PTR param)
-{
-	int index = (int)param;
-
-	EnterCriticalSection(&contactLock);
-	ListContact& contact = contacts[index];
-	double seconds = (GetTickCount() - contact.startedAt) / 1000.0;
-	string endpoint = EndpointToString(contact.address);
-	int messages = contact.messageCount;
-	LeaveCriticalSection(&contactLock);
-
-	char buffer[128];
-	sprintf_s(buffer, sizeof(buffer), "%.3f", seconds);
-	Log("APC AcceptServer: завершение обслуживания клиента " + endpoint +
-		", сообщений " + to_string(messages) + ", время " + buffer + " с");
 }
 
 static ListContact* AddContact(SOCKET client, const SOCKADDR_IN& address)
@@ -214,27 +340,104 @@ static ListContact* AddContact(SOCKET client, const SOCKADDR_IN& address)
 
 	for (int i = 0; i < MAX_CONTACTS; i++)
 	{
-		if (contacts[i].socket == INVALID_SOCKET)
+		if (contacts[i].socket != INVALID_SOCKET)
+			continue;
+
+		ListContact& contact = contacts[i];
+		contact.socket = client;
+		contact.address = address;
+		contact.serviceThread = NULL;
+		contact.acceptThread = acceptThreadHandle;
+		contact.watchdog = NULL;
+		contact.busy = 0;
+		contact.finished = 0;
+		contact.failed = 0;
+		contact.startedAt = GetTickCount();
+		contact.messageCount = 0;
+		contact.pendingBytes = 0;
+		contact.incomingBytes = 0;
+		memset(contact.pending, 0, sizeof(contact.pending));
+		memset(contact.incoming, 0, sizeof(contact.incoming));
+		memset(contact.request, 0, sizeof(contact.request));
+		contact.generation = ++nextGeneration;
+
+		// Ожидающий таймер сеанса взводится сразу после accept: он охватывает
+		// и клиента, который ещё не отправил запрос, и само обслуживание.
+		HANDLE timer = CreateWaitableTimerA(NULL, FALSE, NULL);
+
+		if (timer != NULL)
 		{
-			contacts[i].socket = client;
-			contacts[i].address = address;
-			contacts[i].serviceThread = NULL;
-			contacts[i].acceptThread = acceptThreadHandle;
-			contacts[i].watchdog = NULL;
-			contacts[i].busy = 0;
-			contacts[i].finished = 0;
-			contacts[i].startedAt = GetTickCount();
-			contacts[i].messageCount = 0;
-			contacts[i].pendingBytes = 0;
-			memset(contacts[i].pending, 0, sizeof(contacts[i].pending));
-			memset(contacts[i].request, 0, sizeof(contacts[i].request));
-			result = &contacts[i];
-			break;
+			LARGE_INTEGER dueTime;
+			dueTime.QuadPart = -((LONGLONG)serviceTimeoutMs * 10000);
+
+			if (SetWaitableTimer(timer, &dueTime, 0, SessionTimerAPC,
+					(LPVOID)MakeSessionToken(i, contact.generation), FALSE))
+			{
+				contact.watchdog = timer;
+			}
+			else
+			{
+				CloseHandle(timer);
+			}
 		}
+
+		result = &contact;
+		break;
 	}
 
 	LeaveCriticalSection(&contactLock);
 	return result;
+}
+
+static void ReleaseSession(ListContact& contact)
+{
+	// Обслуживающий поток обязан завершиться до освобождения слота: иначе
+	// слот может быть переиспользован, а поток продолжит работать с ним.
+	if (contact.serviceThread != NULL)
+	{
+		if (WaitForSingleObject(contact.serviceThread, serverExit ? 5000 : 0) != WAIT_OBJECT_0)
+			return;
+
+		CloseHandle(contact.serviceThread);
+		contact.serviceThread = NULL;
+	}
+
+	if (contact.watchdog != NULL)
+	{
+		CancelWaitableTimer(contact.watchdog);
+		CloseHandle(contact.watchdog);
+		contact.watchdog = NULL;
+	}
+
+	ServiceNotice* notice = new ServiceNotice();
+	CopyEndpoint(notice->endpoint, sizeof(notice->endpoint), contact.address);
+	notice->messageCount = contact.messageCount;
+	notice->seconds = (GetTickCount() - contact.startedAt) / 1000.0;
+	notice->started = false;
+
+	if (acceptThreadHandle != NULL)
+		QueueUserAPC(ServiceNoticeAPC, acceptThreadHandle, (ULONG_PTR)notice);
+
+	AddEvent(string(contact.failed ? "отказ" : "завершён") +
+		": клиент " + notice->endpoint +
+		", сообщений " + to_string(contact.messageCount) +
+		", время " + to_string((int)(notice->seconds * 1000 + 0.5) / 1000.0) + " с");
+
+	if (contact.socket != INVALID_SOCKET)
+	{
+		closesocket(contact.socket);
+		contact.socket = INVALID_SOCKET;
+	}
+	contact.busy = 0;
+	contact.finished = 0;
+
+	InterlockedDecrement(&stats.activeConnections);
+
+	// ровно одна терминальная классификация на соединение
+	if (contact.failed)
+		InterlockedIncrement(&stats.refusedConnections);
+	else
+		InterlockedIncrement(&stats.completedConnections);
 }
 
 static DWORD WINAPI AcceptServer(LPVOID)
@@ -272,10 +475,31 @@ static DWORD WINAPI AcceptServer(LPVOID)
 
 	Log("AcceptServer: прослушивание TCP-порта " + to_string(config.port));
 
-	while (!serverExit)
+	while (!serverExit || HasPendingContacts())
 	{
 		SleepEx(0, TRUE);
 		ProcessCommand();
+
+		// wait/shutdown не блокируют цикл: команды продолжают обрабатываться,
+		// пока существующие клиенты завершают обслуживание
+		int mode = drainMode;
+
+		if (mode != 0 && (stats.activeConnections == 0 || serverExit))
+		{
+			if (InterlockedCompareExchange(&drainMode, 0, mode) == mode)
+			{
+				if (mode == 1)
+				{
+					if (!serverExit)
+						Log("AcceptServer: все подключённые клиенты обслужены");
+				}
+				else
+				{
+					Log("AcceptServer: сервер завершает работу (shutdown)");
+					InterlockedExchange(&serverExit, 1);
+				}
+			}
+		}
 
 		if (!accepting)
 		{
@@ -310,15 +534,31 @@ static DWORD WINAPI AcceptServer(LPVOID)
 		}
 
 		InterlockedIncrement(&stats.totalConnections);
-		InterlockedIncrement(&stats.activeConnections);
+			InterlockedIncrement(&stats.activeConnections);
 
-		Log("AcceptServer: подключён клиент " + EndpointToString(clientAddress));
-		SetEvent(contactEvent);
+			Log("AcceptServer: подключён клиент " + EndpointToString(clientAddress));
+			AddEvent("подключён: клиент " + EndpointToString(clientAddress));
+			SetEvent(contactEvent);
 	}
 
 	closesocket(listenSocket);
 	Log("AcceptServer: завершён");
 	return 0;
+}
+
+static void RefuseSession(ListContact& contact, const string& reason)
+{
+	if (contact.socket != INVALID_SOCKET)
+		send(contact.socket, MSG_ERROR_INQUIRY, (int)strlen(MSG_ERROR_INQUIRY) + 1, 0);
+
+	InterlockedExchange(&contact.failed, 1);
+	InterlockedExchange(&contact.finished, 1);
+
+	Log("DispatchServer: отказ \"" + reason + "\" от " +
+		EndpointToString(contact.address) + ", отправлен ErrorInquiry");
+
+	AddEvent("отказ: клиент " + EndpointToString(contact.address) +
+		", причина: " + reason);
 }
 
 static DWORD WINAPI DispatchServer(LPVOID)
@@ -338,10 +578,19 @@ static DWORD WINAPI DispatchServer(LPVOID)
 			if (contact.socket == INVALID_SOCKET || contact.busy || contact.finished)
 				continue;
 
-			char buffer[MESSAGE_SIZE];
-			memset(buffer, 0, sizeof(buffer));
+			// первый запрос — NUL-терминированный элемент протокола;
+			// накапливаем байты, пока терминатор не придёт (таймер сеанса
+			// закроет соединение, если клиент молчит)
+			int space = (int)sizeof(contact.incoming) - 1 - contact.incomingBytes;
 
-			int bytes = recv(contact.socket, buffer, sizeof(buffer) - 1, 0);
+			if (space <= 0)
+			{
+				RefuseSession(contact, "переполнение буфера первого запроса");
+				continue;
+			}
+
+			int bytes = recv(contact.socket,
+				contact.incoming + contact.incomingBytes, space, 0);
 
 			if (bytes == SOCKET_ERROR)
 			{
@@ -351,27 +600,60 @@ static DWORD WINAPI DispatchServer(LPVOID)
 					continue;
 
 				Log("DispatchServer: recv: " + GetErrorMsgText(err));
+				InterlockedExchange(&contact.failed, 1);
 				InterlockedExchange(&contact.finished, 1);
 				continue;
 			}
 
 			if (bytes == 0)
 			{
+				Log("DispatchServer: клиент " + EndpointToString(contact.address) +
+					" отключился без запроса");
+				InterlockedExchange(&contact.failed, 1);
 				InterlockedExchange(&contact.finished, 1);
 				continue;
 			}
 
-			buffer[bytes] = '\0';
+			contact.incomingBytes += bytes;
 
-			FNService service = FindService(buffer);
+			char* terminator = (char*)memchr(contact.incoming, 0,
+				(size_t)contact.incomingBytes);
+
+			if (terminator == NULL)
+			{
+				if (contact.incomingBytes >= (int)sizeof(contact.request))
+					RefuseSession(contact, "первый запрос длиннее " +
+						to_string(sizeof(contact.request) - 1) + " байт");
+
+				continue;
+			}
+
+			int itemLength = (int)(terminator - contact.incoming);
+
+			if (itemLength > (int)sizeof(contact.request) - 1)
+			{
+				RefuseSession(contact, "первый запрос длиннее " +
+					to_string(sizeof(contact.request) - 1) + " байт");
+				continue;
+			}
+
+			memcpy(contact.request, contact.incoming, (size_t)itemLength);
+			contact.request[itemLength] = '\0';
+
+			// байты payload после терминатора запроса сохраняются для обслуживающего потока
+			contact.pendingBytes = contact.incomingBytes - itemLength - 1;
+
+			if (contact.pendingBytes > 0)
+				memcpy(contact.pending, terminator + 1, (size_t)contact.pendingBytes);
+			else
+				contact.pendingBytes = 0;
+
+			FNService service = FindService(contact.request);
 
 			if (service == NULL)
 			{
-				send(contact.socket, MSG_ERROR_INQUIRY, (int)strlen(MSG_ERROR_INQUIRY) + 1, 0);
-				InterlockedIncrement(&stats.refusedConnections);
-				InterlockedExchange(&contact.finished, 1);
-				Log("DispatchServer: неизвестный запрос \"" + string(buffer) + "\" от " +
-					EndpointToString(contact.address) + ", отправлен ErrorInquiry");
+				RefuseSession(contact, "неизвестный запрос \"" +
+					string(contact.request) + "\"");
 				continue;
 			}
 
@@ -379,19 +661,9 @@ static DWORD WINAPI DispatchServer(LPVOID)
 			ioctlsocket(contact.socket, FIONBIO, &blocking);
 
 			InterlockedExchange(&contact.busy, 1);
-			strcpy_s(contact.request, buffer);
 			contact.messageCount = 1;
 
-			contact.pendingBytes = 0;
-			int codeLength = (int)strlen(buffer);
-
-			if (codeLength + 1 < bytes)
-			{
-				contact.pendingBytes = bytes - codeLength - 1;
-				memcpy(contact.pending, buffer + codeLength + 1, contact.pendingBytes);
-			}
-
-			Log("DispatchServer: запрос \"" + string(buffer) + "\" от " +
+			Log("DispatchServer: запрос \"" + string(contact.request) + "\" от " +
 				EndpointToString(contact.address) + " — запуск обслуживающего потока");
 
 			ServiceRequest* request = new ServiceRequest();
@@ -400,33 +672,21 @@ static DWORD WINAPI DispatchServer(LPVOID)
 
 			if (SSS(request) != 0)
 			{
-				InterlockedIncrement(&stats.refusedConnections);
+				InterlockedExchange(&contact.failed, 1);
 				InterlockedExchange(&contact.finished, 1);
 				continue;
 			}
 
+			ServiceNotice* notice = new ServiceNotice();
+			CopyEndpoint(notice->endpoint, sizeof(notice->endpoint), contact.address);
+			notice->messageCount = 0;
+			notice->seconds = 0.0;
+			notice->started = true;
+
 			if (acceptThreadHandle != NULL)
-				QueueUserAPC(StartServiceAPC, acceptThreadHandle, (ULONG_PTR)i);
-
-			if (contact.watchdog != NULL)
-			{
-				CancelWaitableTimer(contact.watchdog);
-				CloseHandle(contact.watchdog);
-				contact.watchdog = NULL;
-			}
-
-			HANDLE watchdog = CreateWaitableTimerA(NULL, FALSE, NULL);
-
-			if (watchdog != NULL)
-			{
-				LARGE_INTEGER dueTime;
-				dueTime.QuadPart = -((LONGLONG)serviceTimeoutMs * 10000);
-
-				if (SetWaitableTimer(watchdog, &dueTime, 0, NULL, NULL, FALSE))
-					contact.watchdog = watchdog;
-				else
-					CloseHandle(watchdog);
-			}
+				QueueUserAPC(ServiceNoticeAPC, acceptThreadHandle, (ULONG_PTR)notice);
+			else
+				delete notice;
 		}
 
 		LeaveCriticalSection(&contactLock);
@@ -461,78 +721,16 @@ static void UpdatePriorities()
 		", приоритет обслуживающих потоков " + ((level == 1) ? "BELOW_NORMAL" : "NORMAL"));
 }
 
-static DWORD WINAPI Watchdog(LPVOID)
-{
-	Log("Watchdog: запущен, лимит обслуживания клиента " + to_string(serviceTimeoutMs) + " мс");
-
-	while (!serverExit)
-	{
-		HANDLE timers[MAX_CONTACTS];
-		int indexes[MAX_CONTACTS];
-		int count = 0;
-
-		EnterCriticalSection(&contactLock);
-
-		for (int i = 0; i < MAX_CONTACTS; i++)
-		{
-			ListContact& contact = contacts[i];
-
-			if (contact.socket != INVALID_SOCKET && contact.watchdog != NULL && !contact.finished)
-			{
-				timers[count] = contact.watchdog;
-				indexes[count] = i;
-				count++;
-			}
-		}
-
-		LeaveCriticalSection(&contactLock);
-
-		if (count == 0)
-		{
-			Sleep(50);
-			continue;
-		}
-
-		DWORD waitResult = WaitForMultipleObjects(count, timers, FALSE, 200);
-
-		if (waitResult >= WAIT_OBJECT_0 && waitResult < WAIT_OBJECT_0 + count)
-		{
-			int index = indexes[waitResult - WAIT_OBJECT_0];
-
-			EnterCriticalSection(&contactLock);
-			ListContact& contact = contacts[index];
-
-			if (contact.socket != INVALID_SOCKET && !contact.finished && contact.serviceThread != NULL)
-			{
-				Log("Watchdog: клиент " + EndpointToString(contact.address) +
-					" превысил лимит " + to_string(serviceTimeoutMs) + " мс — поток завершается принудительно");
-				TerminateThread(contact.serviceThread, 1);
-				InterlockedIncrement(&stats.refusedConnections);
-				InterlockedExchange(&contact.finished, 1);
-			}
-
-			if (contact.watchdog != NULL)
-			{
-				CloseHandle(contact.watchdog);
-				contact.watchdog = NULL;
-			}
-
-			LeaveCriticalSection(&contactLock);
-		}
-	}
-
-	Log("Watchdog: завершён");
-	return 0;
-}
-
 static DWORD WINAPI GarbageCleaner(LPVOID)
 {
 	Log("GarbageCleaner: запущен");
 
-	while (!serverExit)
+	while (!serverExit || HasPendingContacts())
 	{
 		Sleep(100);
-		UpdatePriorities();
+
+		if (!serverExit)
+			UpdatePriorities();
 
 		EnterCriticalSection(&contactLock);
 
@@ -540,33 +738,15 @@ static DWORD WINAPI GarbageCleaner(LPVOID)
 		{
 			ListContact& contact = contacts[i];
 
-			if (contact.socket == INVALID_SOCKET || !contact.finished)
+			// освобождаем любой завершённый сеанс; сокет может уже быть
+			// аварийно закрыт таймаутом или exit (socket == INVALID_SOCKET)
+			if (contact.socket == INVALID_SOCKET && !contact.finished)
 				continue;
 
-			if (acceptThreadHandle != NULL)
-				QueueUserAPC(FinishServiceAPC, acceptThreadHandle, (ULONG_PTR)i);
+			if (!contact.finished)
+				continue;
 
-			if (contact.serviceThread != NULL)
-			{
-				WaitForSingleObject(contact.serviceThread, 200);
-				CloseHandle(contact.serviceThread);
-				contact.serviceThread = NULL;
-			}
-
-			if (contact.watchdog != NULL)
-			{
-				CancelWaitableTimer(contact.watchdog);
-				CloseHandle(contact.watchdog);
-				contact.watchdog = NULL;
-			}
-
-			closesocket(contact.socket);
-			contact.socket = INVALID_SOCKET;
-			contact.busy = 0;
-			contact.finished = 0;
-
-			InterlockedDecrement(&stats.activeConnections);
-			InterlockedIncrement(&stats.completedConnections);
+			ReleaseSession(contact);
 		}
 
 		LeaveCriticalSection(&contactLock);
@@ -582,11 +762,14 @@ static DWORD WINAPI ConsolePipe(LPVOID)
 	char buffer[COMMAND_SIZE];
 	DWORD bytesRead, bytesWritten;
 
+	// Очередь событий очищается только после успешной записи ответа: потеря
+	// доставки не должна терять диагностику. Буфер канала рассчитан на
+	// несколько событий сразу.
 	if ((hPipe = CreateNamedPipeA(config.pipeName,
-		PIPE_ACCESS_DUPLEX,
+		PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
 		PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
 		1,
-		512,
+		4096,
 		512,
 		0,
 		NULL)) == INVALID_HANDLE_VALUE)
@@ -597,32 +780,98 @@ static DWORD WINAPI ConsolePipe(LPVOID)
 
 	Log("ConsolePipe: канал управления создан: " + string(config.pipeName));
 
+	OVERLAPPED connectOverlapped;
+	memset(&connectOverlapped, 0, sizeof(connectOverlapped));
+	HANDLE pipeEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+
 	while (!serverExit)
 	{
-		if (!ConnectNamedPipe(hPipe, NULL))
+		if (pipeEvent == NULL)
+			break;
+
+		// overlapped-подключение с возможностью отмены при завершении сервера:
+		// блокирующий ConnectNamedPipe не позволил бы потоку закончиться
+		memset(&connectOverlapped, 0, sizeof(connectOverlapped));
+		connectOverlapped.hEvent = pipeEvent;
+
+		BOOL connected = ConnectNamedPipe(hPipe, &connectOverlapped);
+		int connectErr = connected ? 0 : GetLastError();
+
+		if (!connected && connectErr == ERROR_IO_PENDING)
 		{
-			int err = GetLastError();
-			if (err != ERROR_PIPE_CONNECTED)
+			// ждать подключения, оставаясь отзывчивым к команде завершения
+			while (!serverExit)
 			{
-				Log("ConsolePipe: ConnectNamedPipe: " + GetErrorMsgText(err));
+				if (WaitForSingleObject(pipeEvent, 200) == WAIT_OBJECT_0)
+					break;
+			}
+
+			if (serverExit)
+			{
+				CancelIoEx(hPipe, &connectOverlapped);
+				DWORD settle = 0;
+				GetOverlappedResult(hPipe, &connectOverlapped, &settle, TRUE);
+				break;
+			}
+
+			// уточнить фактический результат подключения
+			DWORD settle = 0;
+			BOOL got = GetOverlappedResult(hPipe, &connectOverlapped, &settle, FALSE);
+			connectErr = got ? 0 : GetLastError();
+
+			if (!got && connectErr == ERROR_PIPE_CONNECTED)
+				got = TRUE;
+
+			if (!got)
+			{
+				Log("ConsolePipe: ConnectNamedPipe: " + GetErrorMsgText(connectErr));
 				Sleep(100);
 				continue;
 			}
 		}
-
-		memset(buffer, 0, sizeof(buffer));
-
-		if (!ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL))
+		else if (!connected && connectErr != ERROR_PIPE_CONNECTED)
 		{
-			int err = GetLastError();
-			if (err != ERROR_BROKEN_PIPE && err != ERROR_NO_DATA)
-				Log("ConsolePipe: ReadFile: " + GetErrorMsgText(err));
-
-			DisconnectNamedPipe(hPipe);
+			Log("ConsolePipe: ConnectNamedPipe: " + GetErrorMsgText(connectErr));
+			Sleep(100);
 			continue;
 		}
 
-		if (bytesRead == 0)
+		// чтение команды: тоже overlapped, с отменой при завершении сервера
+		memset(buffer, 0, sizeof(buffer));
+		OVERLAPPED readOverlapped;
+		memset(&readOverlapped, 0, sizeof(readOverlapped));
+		readOverlapped.hEvent = pipeEvent;
+		bytesRead = 0;
+
+		BOOL readOk = ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, &readOverlapped);
+		int readErr = readOk ? 0 : GetLastError();
+
+		if (!readOk && readErr == ERROR_IO_PENDING)
+		{
+			while (!serverExit)
+			{
+				if (WaitForSingleObject(pipeEvent, 200) == WAIT_OBJECT_0)
+					break;
+			}
+
+			if (serverExit)
+			{
+				CancelIoEx(hPipe, &readOverlapped);
+				DWORD settle = 0;
+				GetOverlappedResult(hPipe, &readOverlapped, &settle, TRUE);
+				break;
+			}
+
+			DWORD settle = 0;
+			readOk = GetOverlappedResult(hPipe, &readOverlapped, &settle, FALSE);
+			bytesRead = settle;
+			readErr = readOk ? 0 : GetLastError();
+		}
+
+		if (!readOk && readErr != ERROR_BROKEN_PIPE && readErr != ERROR_NO_DATA)
+			Log("ConsolePipe: ReadFile: " + GetErrorMsgText(readErr));
+
+		if (!readOk || bytesRead == 0)
 		{
 			DisconnectNamedPipe(hPipe);
 			continue;
@@ -633,12 +882,57 @@ static DWORD WINAPI ConsolePipe(LPVOID)
 		string cmd = buffer;
 		bool known = (cmd == "start" || cmd == "stop" || cmd == "exit" ||
 			cmd == "statistics" || cmd == "wait" || cmd == "shutdown");
+		bool servedLocally = (cmd == "statistics" || cmd == "events");
 
-		if (!known)
+		if (!known && !servedLocally)
 		{
 			WriteFile(hPipe, MSG_NO_COMMAND, (DWORD)strlen(MSG_NO_COMMAND) + 1, &bytesWritten, NULL);
 			FlushFileBuffers(hPipe);
 			Log("ConsolePipe: неизвестная команда \"" + cmd + "\", отправлено nocmd");
+		}
+		else if (servedLocally)
+		{
+			// statistics/events отвечают в канал напрямую из ConsolePipe:
+			// счётчики и диагностика не должны зависеть от очереди команд
+			string answer;
+
+			if (cmd == "statistics")
+			{
+				answer = StatsLine();
+				Log("ConsolePipe: статистика отправлена в канал: " + answer);
+			}
+			else
+			{
+				EnterCriticalSection(&eventsLock);
+
+				for (size_t i = 0; i < eventQueue.size(); i++)
+				{
+					if (!answer.empty())
+						answer += "\n";
+
+					answer += eventQueue[i];
+				}
+
+				LeaveCriticalSection(&eventsLock);
+
+				Log("ConsolePipe: в канал отправлено событий: " +
+					to_string(answer.empty() ? 0 : (int)count(answer.begin(), answer.end(), '\n') + 1));
+			}
+
+			if (answer.empty())
+				answer = "-";
+
+			BOOL delivered = WriteFile(hPipe, answer.c_str(), (DWORD)answer.size() + 1, &bytesWritten, NULL);
+
+			// очередь очищается только после успешной доставки ответа
+			if (cmd == "events" && delivered)
+			{
+				EnterCriticalSection(&eventsLock);
+				eventQueue.clear();
+				LeaveCriticalSection(&eventsLock);
+			}
+
+			FlushFileBuffers(hPipe);
 		}
 		else
 		{
@@ -658,6 +952,10 @@ static DWORD WINAPI ConsolePipe(LPVOID)
 	}
 
 	CloseHandle(hPipe);
+
+	if (pipeEvent != NULL)
+		CloseHandle(pipeEvent);
+
 	Log("ConsolePipe: завершён");
 	return 0;
 }
@@ -782,12 +1080,11 @@ int main(int argc, char* argv[])
 
 	WSADATA wsaData;
 	HMODULE library = NULL;
-	HANDLE threads[4];
-	int threadsCount = 0;
 
 	InitializeCriticalSection(&contactLock);
 	InitializeCriticalSection(&consoleLock);
 	InitializeCriticalSection(&commandLock);
+	InitializeCriticalSection(&eventsLock);
 
 	for (int i = 0; i < MAX_CONTACTS; i++)
 	{
@@ -828,59 +1125,90 @@ int main(int argc, char* argv[])
 
 	Log("main: библиотека " + string(config.dllName) + " загружена, SSS и FindService импортированы");
 
+	// проверки создания всех основных потоков сервера
+	HANDLE dispatchThread = NULL;
+	HANDLE garbageThread = NULL;
+	HANDLE consoleThread = NULL;
+	HANDLE responseThread = NULL;
+
 	acceptThreadHandle = CreateThread(NULL, 0, AcceptServer, NULL, 0, NULL);
 	if (acceptThreadHandle == NULL)
 	{
 		Log("main: не удалось создать поток AcceptServer");
+		FreeLibrary(library);
+		WSACleanup();
 		return 1;
 	}
 	SetThreadPriority(acceptThreadHandle, THREAD_PRIORITY_ABOVE_NORMAL);
-	threads[threadsCount++] = acceptThreadHandle;
 
-	threads[threadsCount++] = CreateThread(NULL, 0, DispatchServer, NULL, 0, NULL);
-	threads[threadsCount++] = CreateThread(NULL, 0, GarbageCleaner, NULL, 0, NULL);
-	threads[threadsCount++] = CreateThread(NULL, 0, ConsolePipe, NULL, 0, NULL);
-
-	HANDLE responseThread = CreateThread(NULL, 0, ResponseServer, NULL, 0, NULL);
-	HANDLE watchdogThread = CreateThread(NULL, 0, Watchdog, NULL, 0, NULL);
+	if ((dispatchThread = CreateThread(NULL, 0, DispatchServer, NULL, 0, NULL)) == NULL ||
+		(garbageThread = CreateThread(NULL, 0, GarbageCleaner, NULL, 0, NULL)) == NULL ||
+		(consoleThread = CreateThread(NULL, 0, ConsolePipe, NULL, 0, NULL)) == NULL ||
+		(responseThread = CreateThread(NULL, 0, ResponseServer, NULL, 0, NULL)) == NULL)
+	{
+		Log("main: не удалось создать один из основных потоков сервера");
+		InterlockedExchange(&serverExit, 1);
+	}
 
 	while (!serverExit)
 		Sleep(50);
 
 	Log("main: ожидание завершения потоков сервера");
 
-	WaitForSingleObject(acceptThreadHandle, 5000);
-	WaitForSingleObject(threads[1], 5000);
-	WaitForSingleObject(threads[2], 5000);
-	WaitForSingleObject(threads[3], 5000);
+	// сборщик мусора освобождает все сеансы (дожидаясь обслуживающих потоков)
+	WaitForSingleObject(garbageThread, 10000);
+	WaitForSingleObject(acceptThreadHandle, 10000);
+	WaitForSingleObject(dispatchThread, 5000);
+	WaitForSingleObject(consoleThread, 5000);
 	WaitForSingleObject(responseThread, 5000);
-	WaitForSingleObject(watchdogThread, 5000);
 
-	for (int i = 0; i < threadsCount; i++)
-		CloseHandle(threads[i]);
-
-	CloseHandle(responseThread);
-	CloseHandle(watchdogThread);
+	// защитный проход: обслуживающие потоки завершаются до выгрузки DLL
+	EnterCriticalSection(&contactLock);
 
 	for (int i = 0; i < MAX_CONTACTS; i++)
 	{
-		if (contacts[i].socket != INVALID_SOCKET)
-			closesocket(contacts[i].socket);
-		if (contacts[i].serviceThread != NULL)
-			CloseHandle(contacts[i].serviceThread);
+		ListContact& contact = contacts[i];
+
+		if (contact.serviceThread != NULL)
+		{
+			WaitForSingleObject(contact.serviceThread, 5000);
+			CloseHandle(contact.serviceThread);
+			contact.serviceThread = NULL;
+		}
+
+		if (contact.watchdog != NULL)
+		{
+			CancelWaitableTimer(contact.watchdog);
+			CloseHandle(contact.watchdog);
+			contact.watchdog = NULL;
+		}
+
+		if (contact.socket != INVALID_SOCKET)
+		{
+			closesocket(contact.socket);
+			contact.socket = INVALID_SOCKET;
+		}
 	}
 
+	LeaveCriticalSection(&contactLock);
+
+	CloseHandle(acceptThreadHandle);
+	CloseHandle(dispatchThread);
+	CloseHandle(garbageThread);
+	CloseHandle(consoleThread);
+	CloseHandle(responseThread);
 	CloseHandle(contactEvent);
 
 	PrintStats();
+
+	Log("main: сервер завершён");
 
 	FreeLibrary(library);
 	WSACleanup();
 
 	DeleteCriticalSection(&commandLock);
 	DeleteCriticalSection(&consoleLock);
+	DeleteCriticalSection(&eventsLock);
 	DeleteCriticalSection(&contactLock);
-
-	Log("main: сервер завершён");
 	return 0;
 }

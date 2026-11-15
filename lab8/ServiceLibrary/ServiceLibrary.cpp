@@ -48,6 +48,7 @@ static DWORD WINAPI EchoServer(LPVOID param)
 
 		if (send(contact->socket, contact->pending, contact->pendingBytes, 0) == SOCKET_ERROR)
 		{
+			InterlockedExchange(&contact->failed, 1);
 			InterlockedExchange(&contact->finished, 1);
 			return 0;
 		}
@@ -58,7 +59,10 @@ static DWORD WINAPI EchoServer(LPVOID param)
 		int bytes = recv(contact->socket, buffer, sizeof(buffer) - 1, 0);
 
 		if (bytes == SOCKET_ERROR)
+		{
+			InterlockedExchange(&contact->failed, 1);
 			break;
+		}
 
 		if (bytes == 0)
 			break;
@@ -67,7 +71,10 @@ static DWORD WINAPI EchoServer(LPVOID param)
 		contact->messageCount++;
 
 		if (send(contact->socket, buffer, bytes, 0) == SOCKET_ERROR)
+		{
+			InterlockedExchange(&contact->failed, 1);
 			break;
+		}
 	}
 
 	Log("  EchoServer: обслуживание клиента завершено, сообщений: " +
@@ -87,6 +94,7 @@ static DWORD WINAPI TimeServer(LPVOID param)
 	string answer = TimeToString();
 	if (send(contact->socket, answer.c_str(), (int)answer.size() + 1, 0) == SOCKET_ERROR)
 	{
+		InterlockedExchange(&contact->failed, 1);
 		InterlockedExchange(&contact->finished, 1);
 		return 0;
 	}
@@ -95,8 +103,14 @@ static DWORD WINAPI TimeServer(LPVOID param)
 	{
 		int bytes = recv(contact->socket, buffer, sizeof(buffer) - 1, 0);
 
-		if (bytes <= 0)
+		if (bytes == 0)
 			break;
+
+		if (bytes == SOCKET_ERROR)
+		{
+			InterlockedExchange(&contact->failed, 1);
+			break;
+		}
 
 		buffer[bytes] = '\0';
 		contact->messageCount++;
@@ -106,7 +120,10 @@ static DWORD WINAPI TimeServer(LPVOID param)
 
 		answer = TimeToString();
 		if (send(contact->socket, answer.c_str(), (int)answer.size() + 1, 0) == SOCKET_ERROR)
+		{
+			InterlockedExchange(&contact->failed, 1);
 			break;
+		}
 	}
 
 	Log("  TimeServer: обслуживание клиента завершено, сообщений: " +
@@ -128,6 +145,7 @@ static DWORD WINAPI RandServer(LPVOID param)
 	int value = rand();
 	if (send(contact->socket, (const char*)&value, sizeof(value), 0) == SOCKET_ERROR)
 	{
+		InterlockedExchange(&contact->failed, 1);
 		InterlockedExchange(&contact->finished, 1);
 		return 0;
 	}
@@ -136,8 +154,14 @@ static DWORD WINAPI RandServer(LPVOID param)
 	{
 		int bytes = recv(contact->socket, buffer, sizeof(buffer) - 1, 0);
 
-		if (bytes <= 0)
+		if (bytes == 0)
 			break;
+
+		if (bytes == SOCKET_ERROR)
+		{
+			InterlockedExchange(&contact->failed, 1);
+			break;
+		}
 
 		buffer[bytes] = '\0';
 		contact->messageCount++;
@@ -147,7 +171,10 @@ static DWORD WINAPI RandServer(LPVOID param)
 
 		value = rand();
 		if (send(contact->socket, (const char*)&value, sizeof(value), 0) == SOCKET_ERROR)
+		{
+			InterlockedExchange(&contact->failed, 1);
 			break;
+		}
 	}
 
 	Log("  RandServer: обслуживание клиента завершено, сообщений: " +
@@ -228,6 +255,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SSS(LPVOID param)
 	if (contact->serviceThread == NULL)
 	{
 		Log("  SSS: не удалось создать обслуживающий поток");
+		InterlockedExchange(&contact->failed, 1);
 		InterlockedExchange(&contact->finished, 1);
 		return 1;
 	}
