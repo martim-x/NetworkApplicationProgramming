@@ -30,6 +30,9 @@ $RECYCLE.BIN/
 .Trash-*
 .nfs*
 
+# === Рабочие области Superpowers ===
+.superpowers/sdd/
+
 # === Редакторы и IDE ===
 .vscode/*
 !.vscode/settings.json

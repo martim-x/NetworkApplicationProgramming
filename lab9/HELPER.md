@@ -8,6 +8,7 @@ if not exist lab9\build mkdir lab9\build
 cl /nologo /EHsc /utf-8 /W3 lab9\ClientEcho\ClientEcho.cpp lab9\ClientApi\ClientApi.cpp /Fe:lab9\build\ClientEcho.exe
 cl /nologo /EHsc /utf-8 /W3 lab9\ClientTime\ClientTime.cpp lab9\ClientApi\ClientApi.cpp /Fe:lab9\build\ClientTime.exe
 cl /nologo /EHsc /utf-8 /W3 lab9\ClientRand\ClientRand.cpp lab9\ClientApi\ClientApi.cpp /Fe:lab9\build\ClientRand.exe
+cl /nologo /EHsc /utf-8 /W3 lab9\tests\ClientApiTests.cpp /Fe:lab9\build\ClientApiTests.exe
 ```
 
 | Ключ | Что делает |
@@ -35,9 +36,13 @@ cd /d "%USERPROFILE%\Documents\Visual Studio Code\NetworkApplicationProgramming\
 ClientEcho.exe TestServer 9300 9301 5 50
 ClientTime.exe TestServer 9300 9301 3
 ClientRand.exe TestServer 9300 9301 3
+ClientEcho.exe --dns localhost 9301 5 50
+ClientTime.exe --dns localhost 9301 3
+ClientRand.exe --dns localhost 9301 3
 ```
 
-Аргументы: `[позывной] [UDP-порт поиска] [TCP-порт сервера] [количество] [задержка мс]`.
+Аргументы широковещательного режима: `[позывной] [UDP-порт поиска] [TCP-порт сервера] [количество] [задержка мс]`.
+Режим DNS: `--dns <hostname> <tcpPort> [count] [delayMs]` — имя разрешается через `getaddrinfo` (IPv4) и клиент подключается по TCP; hostname при этом не используется как UDP-позывной.
 
 Ожидаемый вывод `ClientEcho`:
 
@@ -78,3 +83,7 @@ ClientEcho.exe NoSuchServer 9300 9301 2 10
 | `ответ на некорректный запрос` пустой | сервер закрыл соединение без ответа | убедиться, что запущена актуальная сборка ЛР8 |
 | `ClientEcho: корректных ответов 4 из 5` | потеря первого сообщения при старом сервере | пересобрать `ServiceLibrary.dll` (в актуальной версии остаток буфера передаётся обслуживающему потоку) |
 | нет ответа на `time`/`rand` | клиент отправил строку, отличную от кода запроса | отправлять ровно `time` / `rand` |
+| `некорректный TCP-порт/UDP-порт/количество/задержка` (код возврата 2) | аргумент не целое число или вне диапазона (порты 1..65535, количество >= 1, задержка >= 0) | исправить аргумент; `atoi`-тихие ошибки («12abc» -> 12) больше не пропускаются |
+| `не удалось разрешить имя ... или подключиться к серверу` | DNS не разрешил hostname (код 11001/11004) или ни один адрес не принял TCP за 3 с | проверить имя хоста и доступность сервера; код возврата 1 |
+| `корректных ответов X из N` + код возврата 1 | сервер оборвал сеанс или ответил частично — получено меньше, чем запрошено | проверять журнал сервера; частичный rand-ответ (менее 4 байт) тоже считается отказом |
+| выход с кодом 1 после `сервер не найден` | широковещательный поиск не получил отклик за 3 с | запустить сервер до клиентов, сверить позывной и UDP-порт |

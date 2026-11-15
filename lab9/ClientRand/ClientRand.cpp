@@ -9,14 +9,91 @@
 #pragma comment(lib, "WS2_32.lib")
 using namespace std;
 
+// Режимы запуска:
+//   ClientRand.exe [позывной] [UDP-порт] [TCP-порт] [запросов]  — широковещательный поиск (по умолчанию)
+//   ClientRand.exe --dns <hostname> <tcpPort> [count]           — поиск по имени хоста
+// Некорректные аргументы и неполный сеанс — ненулевой код возврата.
+// Все запросы идут через RequestRand: ровно 4 байта ответа, частичное
+// целое не засчитывается как успех.
+
+static int ParsePortArg(const char* text, const char* title, short& port)
+{
+	int value = 0;
+
+	if (!ParseIntStrict(text, value) || value < 1 || value > 65535)
+	{
+		fprintf(stderr, "ClientRand: некорректный %s \"%s\" (нужно целое 1..65535)\n", title, text);
+		return 2;
+	}
+
+	port = (short)value;
+	return 0;
+}
+
 int main(int argc, char* argv[])
 {
 	SetConsoleOutputCP(CP_UTF8);
 
-	const char* callSign = (argc > 1) ? argv[1] : "ConcurrentServer";
-	short udpPort = (short)((argc > 2) ? atoi(argv[2]) : 9200);
-	short tcpPort = (short)((argc > 3) ? atoi(argv[3]) : 2000);
-	int requestTotal = (argc > 4) ? atoi(argv[4]) : 3;
+	bool dnsMode = (argc > 1 && strcmp(argv[1], "--dns") == 0);
+	const char* callSign = "ConcurrentServer";
+	const char* hostname = "";
+	short udpPort = 9200;
+	short tcpPort = 2000;
+	int requestTotal = 3;
+
+	if (dnsMode)
+	{
+		if (argc < 4)
+		{
+			fprintf(stderr, "Использование: ClientRand.exe --dns <hostname> <tcpPort> [count]\n");
+			return 2;
+		}
+
+		hostname = argv[2];
+
+		int rc = ParsePortArg(argv[3], "TCP-порт", tcpPort);
+		if (rc != 0)
+			return rc;
+
+		if (argc > 4)
+		{
+			int countValue = 0;
+
+			if (!ParseIntStrict(argv[4], countValue) || countValue < 1)
+			{
+				fprintf(stderr, "ClientRand: некорректное количество запросов \"%s\" (нужно целое >= 1)\n", argv[4]);
+				return 2;
+			}
+
+			requestTotal = countValue;
+		}
+	}
+	else
+	{
+		if (argc > 1)
+			callSign = argv[1];
+
+		int rc = 0;
+
+		if (argc > 2 && (rc = ParsePortArg(argv[2], "UDP-порт", udpPort)) != 0)
+			return rc;
+
+		if (argc > 3 && (rc = ParsePortArg(argv[3], "TCP-порт", tcpPort)) != 0)
+			return rc;
+
+		if (argc > 4)
+		{
+			int countValue = 0;
+
+			if (!ParseIntStrict(argv[4], countValue) || countValue < 1)
+			{
+				fprintf(stderr, "ClientRand: некорректное количество запросов \"%s\" (нужно целое >= 1)\n", argv[4]);
+				return 2;
+			}
+
+			requestTotal = countValue;
+		}
+	}
 
 	WSADATA wsaData;
 	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
@@ -25,31 +102,43 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
-	cout << "ClientRand: поиск сервера \"" << callSign << "\" (широковещание, UDP-порт "
-		<< udpPort << ", TCP-порт " << tcpPort << ")" << endl;
-
 	ServerAddress server;
-	if (!FindServer(callSign, udpPort, tcpPort, server, 3000))
+	bool found = false;
+
+	if (dnsMode)
 	{
-		cout << "ClientRand: сервер не найден" << endl;
-		WSACleanup();
-		return 1;
+		cout << "ClientRand: подключение по имени \"" << hostname << "\" (TCP-порт " << tcpPort << ")" << endl;
+		found = FindServerByName(hostname, tcpPort, server, 3000);
+
+		if (!found)
+		{
+			cout << "ClientRand: не удалось разрешить имя \"" << hostname
+				<< "\" или подключиться к серверу" << endl;
+			PrintError("FindServerByName", WSAGetLastError());
+			WSACleanup();
+			return 1;
+		}
+	}
+	else
+	{
+		cout << "ClientRand: поиск сервера \"" << callSign << "\" (широковещание, UDP-порт "
+			<< udpPort << ", TCP-порт " << tcpPort << ")" << endl;
+		found = FindServer(callSign, udpPort, tcpPort, server, 3000);
+
+		if (!found)
+		{
+			cout << "ClientRand: сервер не найден" << endl;
+			WSACleanup();
+			return 1;
+		}
 	}
 
-	cout << "ClientRand: найден сервер " << server.ip << ":" << server.port << endl;
+	cout << "ClientRand: найден сервер " << server.ip << ":" << (unsigned short)server.port << endl;
 
 	SOCKET s = ConnectToServer(server);
 	if (s == INVALID_SOCKET)
 	{
 		PrintError("ConnectToServer", WSAGetLastError());
-		WSACleanup();
-		return 1;
-	}
-
-	if (!SendRequest(s, "rand"))
-	{
-		PrintError("SendRequest", WSAGetLastError());
-		closesocket(s);
 		WSACleanup();
 		return 1;
 	}
@@ -60,27 +149,7 @@ int main(int argc, char* argv[])
 
 	for (int i = 1; i <= requestTotal; i++)
 	{
-		if (i == 1)
-		{
-			char buffer[sizeof(int)];
-			int received = 0;
-
-			while (received < (int)sizeof(int))
-			{
-				int bytes = recv(s, buffer + received, (int)sizeof(int) - received, 0);
-				if (bytes <= 0)
-					break;
-				received += bytes;
-			}
-
-			if (received == (int)sizeof(int))
-			{
-				memcpy(&value, buffer, sizeof(int));
-				receivedOk++;
-				cout << "  случайное число " << i << ": " << value << endl;
-			}
-		}
-		else if (RequestRand(s, value))
+		if (RequestRand(s, value))
 		{
 			receivedOk++;
 			cout << "  случайное число " << i << ": " << value << endl;
@@ -89,6 +158,16 @@ int main(int argc, char* argv[])
 		{
 			cout << "  ошибка при получении числа " << i << endl;
 		}
+	}
+
+	if (receivedOk < requestTotal)
+	{
+		closesocket(s);
+		cout << "ClientRand: корректных ответов " << receivedOk << " из " << requestTotal
+			<< ", время сеанса " << ElapsedSeconds(start) << " с" << endl;
+		cout << "ClientRand: получено меньше ответов, чем запрошено — сеанс завершился с ошибкой" << endl;
+		WSACleanup();
+		return 1;
 	}
 
 	cout << "ClientRand: корректных ответов " << receivedOk << " из " << requestTotal
